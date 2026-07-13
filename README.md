@@ -54,6 +54,9 @@ CCH_SMOKE_AMOUNT_SATS=100 \
 python -m pytest -vv -s
 ```
 
+其中 `CCH_SMOKE_AMOUNT_SATS=100` 表示每条路径的本金为
+`100 sats ↔ 100 个 mzBTC 最小单位（0.00000100 mzBTC）`，CCH fee 另计。
+
 也可以：
 
 ```bash

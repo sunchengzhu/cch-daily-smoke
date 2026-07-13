@@ -386,6 +386,16 @@ def assert_balance_delta(label, before, after, expected_delta, details=None):
     assert actual_delta == expected_delta, message
 
 
+def format_mzbtc(amount):
+    absolute_amount = abs(amount)
+    whole, fraction = divmod(absolute_amount, 100_000_000)
+    sign = "-" if amount < 0 else ""
+    return (
+        f"{amount:,} 个 mzBTC 最小单位"
+        f"（{sign}{whole}.{fraction:08d} mzBTC）"
+    )
+
+
 def print_balance_table(title, unit, rows):
     print(f"\n{title} ({unit})")
     print(f"{'Node':<16}{'Before':>16}{'After':>16}{'Change':>16}")
@@ -419,7 +429,7 @@ def print_flow_summary(
     print(f"Payment hash         : {payment_hash}")
     print(
         f"Principal            : {principal_sats:,} sats <=> "
-        f"{principal_sats:,} mzBTC min units"
+        f"{format_mzbtc(principal_sats)}"
     )
     print(f"CCH fee              : {cch_fee_sats:,} sats")
     print(f"Source paid          : {source_paid}")
@@ -434,7 +444,7 @@ def print_flow_summary(
         print(f"\nFiber channel: {fiber_channel_id}")
     print_balance_table(
         "Fiber balances",
-        "mzBTC min units",
+        "mzBTC 最小单位",
         [
             ("fiber2", fiber_before["fiber2"], fiber_after["fiber2"]),
             (
@@ -568,7 +578,7 @@ def test_cch_daily_smoke_bidirectional():
         payment_hash=send_payment_hash,
         principal_sats=amount_sats,
         cch_fee_sats=send_fee_sats,
-        source_paid=f"{send_fiber_amount:,} mzBTC min units",
+        source_paid=format_mzbtc(send_fiber_amount),
         destination_received=f"{amount_sats:,} sats",
         fiber_channel_id=fiber_channel_id,
         fiber_before=fiber_before,
@@ -642,7 +652,7 @@ def test_cch_daily_smoke_bidirectional():
         principal_sats=receive_fiber_amount,
         cch_fee_sats=receive_fee_sats,
         source_paid=f"{lightning_amount:,} sats",
-        destination_received=f"{receive_fiber_amount:,} mzBTC min units",
+        destination_received=format_mzbtc(receive_fiber_amount),
         fiber_channel_id=fiber_channel_id,
         fiber_before=fiber_before,
         fiber_after=fiber_after,

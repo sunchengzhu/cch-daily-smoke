@@ -3,6 +3,7 @@ import pytest
 from test_cch_daily_smoke import (
     active_lnd_channel,
     assert_balance_delta,
+    format_mzbtc,
     print_flow_summary,
 )
 
@@ -13,7 +14,7 @@ def test_flow_summary_prints_before_after_and_change(capsys):
         payment_hash="0x1234",
         principal_sats=100,
         cch_fee_sats=10,
-        source_paid="110 mzBTC min units",
+        source_paid=format_mzbtc(110),
         destination_received="100 sats",
         fiber_channel_id="0xfiber",
         fiber_before={"fiber2": 1000, "fiber1_cch": 0},
@@ -29,7 +30,14 @@ def test_flow_summary_prints_before_after_and_change(capsys):
 
     output = capsys.readouterr().out
     assert "FLOW 1: fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b" in output
-    assert "Source paid          : 110 mzBTC min units" in output
+    assert (
+        "Principal            : 100 sats <=> "
+        "100 个 mzBTC 最小单位（0.00000100 mzBTC）"
+    ) in output
+    assert (
+        "Source paid          : "
+        "110 个 mzBTC 最小单位（0.00000110 mzBTC）"
+    ) in output
     assert "Destination received : 100 sats" in output
     assert "fiber2" in output and "-110" in output
     assert "fiber1/CCH" in output and "+110" in output
@@ -47,7 +55,7 @@ def test_flow_summary_prints_channel_details_in_debug_mode(capsys):
         principal_sats=100,
         cch_fee_sats=10,
         source_paid="110 sats",
-        destination_received="100 mzBTC min units",
+        destination_received=format_mzbtc(100),
         fiber_channel_id="0xfiber",
         fiber_before={"fiber2": 1000, "fiber1_cch": 0},
         fiber_after={"fiber2": 900, "fiber1_cch": 100},
@@ -65,6 +73,13 @@ def test_flow_summary_prints_channel_details_in_debug_mode(capsys):
     assert "Fiber channel: 0xfiber" in output
     assert "LND channel: lnd-channel" in output
     assert "LND outpoint: tx:0" in output
+
+
+def test_format_mzbtc_uses_eight_decimal_places():
+    assert format_mzbtc(100) == "100 个 mzBTC 最小单位（0.00000100 mzBTC）"
+    assert format_mzbtc(100_000_000) == (
+        "100,000,000 个 mzBTC 最小单位（1.00000000 mzBTC）"
+    )
 
 
 def test_balance_failure_includes_channel_details():
