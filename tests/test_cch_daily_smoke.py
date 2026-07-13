@@ -355,6 +355,75 @@ def assert_balance_delta(label, before, after, expected_delta):
     )
 
 
+def print_balance_table(title, unit, rows):
+    print(f"\n{title} ({unit})")
+    print(f"{'Node':<16}{'Before':>16}{'After':>16}{'Change':>16}")
+    print("-" * 64)
+    for node, before, after in rows:
+        before_text = f"{before:,}"
+        after_text = f"{after:,}"
+        change_text = f"{after - before:+,}"
+        print(f"{node:<16}{before_text:>16}{after_text:>16}{change_text:>16}")
+
+
+def print_flow_summary(
+    path,
+    payment_hash,
+    principal_sats,
+    cch_fee_sats,
+    source_paid,
+    destination_received,
+    fiber_channel_id,
+    fiber_before,
+    fiber_after,
+    lnd_before,
+    lnd_after,
+    topup=None,
+):
+    border = "=" * 88
+    print(f"\n{border}")
+    print(path)
+    print(border)
+    print(f"Payment hash         : {payment_hash}")
+    print(
+        f"Principal            : {principal_sats:,} sats <=> "
+        f"{principal_sats:,} mzBTC min units"
+    )
+    print(f"CCH fee              : {cch_fee_sats:,} sats")
+    print(f"Source paid          : {source_paid}")
+    print(f"Destination received : {destination_received}")
+    if topup:
+        print(
+            f"LND liquidity top-up : {topup['amount_sats']:,} sats "
+            f"(spendable before: {topup['previous_spendable_sats']:,} sats)"
+        )
+
+    print(f"\nFiber channel: {fiber_channel_id}")
+    print_balance_table(
+        "Fiber balances",
+        "mzBTC min units",
+        [
+            ("fiber2", fiber_before["fiber2"], fiber_after["fiber2"]),
+            (
+                "fiber1/CCH",
+                fiber_before["fiber1_cch"],
+                fiber_after["fiber1_cch"],
+            ),
+        ],
+    )
+
+    print(f"\nLND channel: {lnd_before['chan_id']}")
+    print(f"LND outpoint: {lnd_before['channel_point']}")
+    print_balance_table(
+        "LND balances",
+        "sats",
+        [
+            ("lnd-a", lnd_before["lnd_a"], lnd_after["lnd_a"]),
+            ("lnd-b", lnd_before["lnd_b"], lnd_after["lnd_b"]),
+        ],
+    )
+
+
 def create_fiber_invoice(config, amount_sats):
     invoice = fnn(
         config,
@@ -382,7 +451,6 @@ def test_cch_daily_smoke_bidirectional():
 
     channel = get_fiber_channel(config)
     fiber_channel_id = channel["channel_id"]
-    summary = {"fiber_channel_id": fiber_channel_id, "flows": {}}
 
     # fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b
     lnd_before = lnd_channel_balances_from_a(config)
@@ -446,16 +514,19 @@ def test_cch_daily_smoke_bidirectional():
     assert_balance_delta(
         "fiber -> lnd lnd-b", lnd_before["lnd_b"], lnd_after["lnd_b"], amount_sats
     )
-    summary["flows"]["fiber_to_lnd"] = {
-        "payment_hash": send_payment_hash,
-        "btc_paid_sats": amount_sats,
-        "fiber_paid_min_units": send_fiber_amount,
-        "cch_fee_sats": send_fee_sats,
-        "fiber_before": fiber_before,
-        "fiber_after": fiber_after,
-        "lnd_before": lnd_before,
-        "lnd_after": lnd_after,
-    }
+    print_flow_summary(
+        path="FLOW 1: fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b",
+        payment_hash=send_payment_hash,
+        principal_sats=amount_sats,
+        cch_fee_sats=send_fee_sats,
+        source_paid=f"{send_fiber_amount:,} mzBTC min units",
+        destination_received=f"{amount_sats:,} sats",
+        fiber_channel_id=fiber_channel_id,
+        fiber_before=fiber_before,
+        fiber_after=fiber_after,
+        lnd_before=lnd_before,
+        lnd_after=lnd_after,
+    )
 
     # lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2
     fiber_invoice, receive_payment_hash = create_fiber_invoice(config, amount_sats)
@@ -506,17 +577,19 @@ def test_cch_daily_smoke_bidirectional():
         lnd_after["lnd_b"],
         -lightning_amount,
     )
-    summary["flows"]["lnd_to_fiber"] = {
-        "payment_hash": receive_payment_hash,
-        "btc_paid_sats": lightning_amount,
-        "fiber_paid_min_units": receive_fiber_amount,
-        "cch_fee_sats": receive_fee_sats,
-        "topup": topup,
-        "fiber_before": fiber_before,
-        "fiber_after": fiber_after,
-        "lnd_before": lnd_before,
-        "lnd_after": lnd_after,
-    }
+    print_flow_summary(
+        path="FLOW 2: lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2",
+        payment_hash=receive_payment_hash,
+        principal_sats=receive_fiber_amount,
+        cch_fee_sats=receive_fee_sats,
+        source_paid=f"{lightning_amount:,} sats",
+        destination_received=f"{receive_fiber_amount:,} mzBTC min units",
+        fiber_channel_id=fiber_channel_id,
+        fiber_before=fiber_before,
+        fiber_after=fiber_after,
+        lnd_before=lnd_before,
+        lnd_after=lnd_after,
+        topup=topup,
+    )
 
-    print("\nCCH daily smoke summary:")
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    print("\nCCH daily smoke completed: both directions passed.")
