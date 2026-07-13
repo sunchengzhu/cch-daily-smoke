@@ -82,12 +82,12 @@ gh secret set CCH_SMOKE_FNN_AUTH_TOKEN --repo sunchengzhu/cch-daily-smoke
 token 需要覆盖本 smoke 用到的 RPC 权限：
 
 ```text
-read("info");
-read("channel");
-read("invoice");
-write("invoice");
-read("payment");
-write("payment");
+read("node");
+read("channels");
+read("invoices");
+write("invoices");
+read("payments");
+write("payments");
 read("cch");
 write("cch");
 ```
