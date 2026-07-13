@@ -391,10 +391,7 @@ def format_mzbtc(amount):
 
 
 def print_asset_convention():
-    print("\n资产单位约定（CCH Demo）")
-    print("1 mzBTC unit = 1 sat")
-    print("100,000,000 mzBTC units = 1 mzBTC = 1 BTC")
-    print("该换算仅为本 Demo 的 CCH 计价约定。")
+    print("\n资产换算（CCH Demo）：1 BTC = 1 mzBTC")
 
 
 def print_balance_table(title, unit, rows):

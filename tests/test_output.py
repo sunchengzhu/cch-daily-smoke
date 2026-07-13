@@ -79,9 +79,7 @@ def test_asset_convention_is_printed_once(capsys):
     print_asset_convention()
 
     output = capsys.readouterr().out
-    assert "1 mzBTC unit = 1 sat" in output
-    assert "100,000,000 mzBTC units = 1 mzBTC = 1 BTC" in output
-    assert "仅为本 Demo 的 CCH 计价约定" in output
+    assert output.strip() == "资产换算（CCH Demo）：1 BTC = 1 mzBTC"
 
 
 def test_balance_failure_includes_channel_details():

@@ -2,8 +2,7 @@
 
 独立 smoke 项目，用于每日验证已部署 testnet 环境里的两条 CCH 主流程。
 
-> 本 Demo 约定 `1 mzBTC unit = 1 sat`，即
-> `100,000,000 mzBTC units = 1 mzBTC = 1 BTC`。该换算仅用于本 Demo 的 CCH 测试。
+> 本 Demo 按 `1 BTC = 1 mzBTC` 计价。
 
 - `fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b`
 - `lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2`
