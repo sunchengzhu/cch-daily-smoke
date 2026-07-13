@@ -99,8 +99,8 @@ write("cch");
 
 - 从 `nervosnetwork/fiber` 选择发布时间最新的 release，包括 prerelease。
 - 下载当前 Linux 架构对应的 portable 包并校验 GitHub 提供的 SHA-256。
-- 版本无变化时不重启；有变化时先停止 `fiber-testnet1.service` 和
-  `fiber-testnet2.service`。
+- `fnn` 版本无变化时不重启；只有 `fnn-cli` 落后时直接更新 CLI，不扫描数据库。
+- `fnn` 有新版本时先停止 `fiber-testnet1.service` 和 `fiber-testnet2.service`。
 - 使用新 `fnn --check-validate` 检查两个节点的数据库。只有确认不需要迁移时，
   才备份并替换两个节点的 `fnn`，同时更新 node1 的 `fnn-cli`。
 - 启动服务并等待两个 RPC 返回版本、commit 和 pubkey，成功后才运行 smoke。

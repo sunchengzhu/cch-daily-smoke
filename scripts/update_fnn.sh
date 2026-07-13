@@ -17,9 +17,10 @@ TMP_DIR="$(mktemp -d)"
 BACKUP_DIR=""
 SERVICES_STOPPED=0
 BINARIES_REPLACED=0
+CLI_REPLACED=0
 
 log() {
-  printf '[fnn-update] %s\n' "$*"
+  printf '[fnn-update] %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
 
 require_command() {
@@ -53,22 +54,28 @@ start_services() {
 rollback() {
   set +e
   log "update failed; restoring previous binaries"
-  sudo -n systemctl stop "$SERVICE1" "$SERVICE2"
+  if [[ "$SERVICES_STOPPED" == "1" || "$BINARIES_REPLACED" == "1" ]]; then
+    sudo -n systemctl stop "$SERVICE1" "$SERVICE2"
+  fi
   if [[ "$BINARIES_REPLACED" == "1" && -n "$BACKUP_DIR" ]]; then
     sudo -n install -m 0755 "$BACKUP_DIR/node1-fnn" "$NODE1_DIR/fnn"
     sudo -n install -m 0755 "$BACKUP_DIR/node2-fnn" "$NODE2_DIR/fnn"
-    if [[ -f "$BACKUP_DIR/node1-fnn-cli" ]]; then
-      sudo -n install -m 0755 "$BACKUP_DIR/node1-fnn-cli" "$NODE1_DIR/fnn-cli"
-    fi
   fi
-  sudo -n systemctl start "$SERVICE1" "$SERVICE2"
-  sudo -n systemctl is-active "$SERVICE1" "$SERVICE2" >&2
+  if [[ "$CLI_REPLACED" == "1" && -f "$BACKUP_DIR/node1-fnn-cli" ]]; then
+    sudo -n install -m 0755 "$BACKUP_DIR/node1-fnn-cli" "$NODE1_DIR/fnn-cli"
+  fi
+  if [[ "$SERVICES_STOPPED" == "1" || "$BINARIES_REPLACED" == "1" ]]; then
+    sudo -n systemctl start "$SERVICE1" "$SERVICE2"
+    sudo -n systemctl is-active "$SERVICE1" "$SERVICE2" >&2
+  fi
 }
 
 cleanup() {
   local status=$?
   if [[ "$status" != "0" \
-    && ("$SERVICES_STOPPED" == "1" || "$BINARIES_REPLACED" == "1") ]]; then
+    && ("$SERVICES_STOPPED" == "1" \
+      || "$BINARIES_REPLACED" == "1" \
+      || "$CLI_REPLACED" == "1") ]]; then
     rollback
   fi
   rm -rf "$TMP_DIR"
@@ -173,9 +180,17 @@ log "node2 fnn      : $NODE2_FNN_VERSION"
 log "target fnn-cli : $TARGET_CLI_VERSION"
 log "node1 fnn-cli  : $NODE1_CLI_VERSION"
 
+FNN_NEEDS_UPDATE=0
+CLI_NEEDS_UPDATE=0
 if [[ "$NODE1_FNN_VERSION" != "$TARGET_FNN_VERSION" \
-  || "$NODE2_FNN_VERSION" != "$TARGET_FNN_VERSION" \
-  || "$NODE1_CLI_VERSION" != "$TARGET_CLI_VERSION" ]]; then
+  || "$NODE2_FNN_VERSION" != "$TARGET_FNN_VERSION" ]]; then
+  FNN_NEEDS_UPDATE=1
+fi
+if [[ "$NODE1_CLI_VERSION" != "$TARGET_CLI_VERSION" ]]; then
+  CLI_NEEDS_UPDATE=1
+fi
+
+if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
   log "stopping Fiber services before validation and replacement"
   SERVICES_STOPPED=1
   sudo -n systemctl stop "$SERVICE1" "$SERVICE2"
@@ -203,12 +218,21 @@ if [[ "$NODE1_FNN_VERSION" != "$TARGET_FNN_VERSION" \
   fi
 
   BINARIES_REPLACED=1
+  CLI_REPLACED=1
   sudo -n install -m 0755 "$TMP_DIR/fnn" "$NODE1_DIR/fnn"
   sudo -n install -m 0755 "$TMP_DIR/fnn" "$NODE2_DIR/fnn"
   sudo -n install -m 0755 "$TMP_DIR/fnn-cli" "$NODE1_DIR/fnn-cli"
 
   log "installed $TARGET_TAG; previous binaries saved in $BACKUP_DIR"
   start_services
+elif [[ "$CLI_NEEDS_UPDATE" == "1" ]]; then
+  BACKUP_DIR="$BACKUP_ROOT/$(date -u '+%Y%m%dT%H%M%SZ')-$TARGET_TAG"
+  sudo -n install -d -m 0755 "$BACKUP_DIR"
+  sudo -n cp -a "$NODE1_DIR/fnn-cli" "$BACKUP_DIR/node1-fnn-cli"
+
+  CLI_REPLACED=1
+  sudo -n install -m 0755 "$TMP_DIR/fnn-cli" "$NODE1_DIR/fnn-cli"
+  log "updated fnn-cli without restarting Fiber; previous CLI saved in $BACKUP_DIR"
 else
   log "Fiber binaries are already current; restart is not needed"
 fi
