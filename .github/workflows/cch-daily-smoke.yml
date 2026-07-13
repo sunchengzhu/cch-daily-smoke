@@ -15,7 +15,7 @@ permissions:
 jobs:
   cch-daily-smoke:
     runs-on: [self-hosted, test-new-02]
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
       CCH_SMOKE_ENABLED: "1"
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
