@@ -387,13 +387,14 @@ def assert_balance_delta(label, before, after, expected_delta, details=None):
 
 
 def format_mzbtc(amount):
-    absolute_amount = abs(amount)
-    whole, fraction = divmod(absolute_amount, 100_000_000)
-    sign = "-" if amount < 0 else ""
-    return (
-        f"{amount:,} 个 mzBTC 最小单位"
-        f"（{sign}{whole}.{fraction:08d} mzBTC）"
-    )
+    return f"{amount:,} mzBTC units"
+
+
+def print_asset_convention():
+    print("\n资产单位约定（CCH Demo）")
+    print("1 mzBTC unit = 1 sat")
+    print("100,000,000 mzBTC units = 1 mzBTC = 1 BTC")
+    print("该换算仅为本 Demo 的 CCH 计价约定。")
 
 
 def print_balance_table(title, unit, rows):
@@ -428,7 +429,7 @@ def print_flow_summary(
     print(border)
     print(f"Payment hash         : {payment_hash}")
     print(
-        f"Principal            : {principal_sats:,} sats <=> "
+        f"Principal            : {principal_sats:,} sats ↔ "
         f"{format_mzbtc(principal_sats)}"
     )
     print(f"CCH fee              : {cch_fee_sats:,} sats")
@@ -444,7 +445,7 @@ def print_flow_summary(
         print(f"\nFiber channel: {fiber_channel_id}")
     print_balance_table(
         "Fiber balances",
-        "mzBTC 最小单位",
+        "mzBTC units",
         [
             ("fiber2", fiber_before["fiber2"], fiber_after["fiber2"]),
             (
@@ -492,6 +493,7 @@ def test_cch_daily_smoke_bidirectional():
     config = CchSmokeConfig.from_env()
     amount_sats = config.amount_sats
     assert amount_sats > 0
+    print_asset_convention()
 
     channel = get_fiber_channel(config)
     fiber_channel_id = channel["channel_id"]

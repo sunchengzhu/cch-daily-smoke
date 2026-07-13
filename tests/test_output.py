@@ -4,6 +4,7 @@ from test_cch_daily_smoke import (
     active_lnd_channel,
     assert_balance_delta,
     format_mzbtc,
+    print_asset_convention,
     print_flow_summary,
 )
 
@@ -30,14 +31,8 @@ def test_flow_summary_prints_before_after_and_change(capsys):
 
     output = capsys.readouterr().out
     assert "FLOW 1: fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b" in output
-    assert (
-        "Principal            : 100 sats <=> "
-        "100 个 mzBTC 最小单位（0.00000100 mzBTC）"
-    ) in output
-    assert (
-        "Source paid          : "
-        "110 个 mzBTC 最小单位（0.00000110 mzBTC）"
-    ) in output
+    assert "Principal            : 100 sats ↔ 100 mzBTC units" in output
+    assert "Source paid          : 110 mzBTC units" in output
     assert "Destination received : 100 sats" in output
     assert "fiber2" in output and "-110" in output
     assert "fiber1/CCH" in output and "+110" in output
@@ -75,11 +70,18 @@ def test_flow_summary_prints_channel_details_in_debug_mode(capsys):
     assert "LND outpoint: tx:0" in output
 
 
-def test_format_mzbtc_uses_eight_decimal_places():
-    assert format_mzbtc(100) == "100 个 mzBTC 最小单位（0.00000100 mzBTC）"
-    assert format_mzbtc(100_000_000) == (
-        "100,000,000 个 mzBTC 最小单位（1.00000000 mzBTC）"
-    )
+def test_format_mzbtc_uses_integer_units():
+    assert format_mzbtc(100) == "100 mzBTC units"
+    assert format_mzbtc(100_000_000) == "100,000,000 mzBTC units"
+
+
+def test_asset_convention_is_printed_once(capsys):
+    print_asset_convention()
+
+    output = capsys.readouterr().out
+    assert "1 mzBTC unit = 1 sat" in output
+    assert "100,000,000 mzBTC units = 1 mzBTC = 1 BTC" in output
+    assert "仅为本 Demo 的 CCH 计价约定" in output
 
 
 def test_balance_failure_includes_channel_details():

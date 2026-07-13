@@ -1,6 +1,9 @@
 # CCH Daily Smoke
 
-独立 smoke 项目，用于每日验证已部署 testnet 环境里的两条 CCH 主流程：
+独立 smoke 项目，用于每日验证已部署 testnet 环境里的两条 CCH 主流程。
+
+> 本 Demo 约定 `1 mzBTC unit = 1 sat`，即
+> `100,000,000 mzBTC units = 1 mzBTC = 1 BTC`。该换算仅用于本 Demo 的 CCH 测试。
 
 - `fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b`
 - `lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2`
@@ -55,7 +58,7 @@ python -m pytest -vv -s
 ```
 
 其中 `CCH_SMOKE_AMOUNT_SATS=100` 表示每条路径的本金为
-`100 sats ↔ 100 个 mzBTC 最小单位（0.00000100 mzBTC）`，CCH fee 另计。
+`100 sats ↔ 100 mzBTC units`，CCH fee 另计。
 
 也可以：
 

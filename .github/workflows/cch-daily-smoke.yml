@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       AmountSats:
-        description: "本金：N sats ↔ N 个 mzBTC 最小单位（mzBTC 为 8 位小数）"
+        description: "每条路径本金：N sats ↔ N mzBTC units"
         default: "100"
 
 permissions:
