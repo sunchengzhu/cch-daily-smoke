@@ -71,6 +71,27 @@ make smoke
 | `CCH_SMOKE_FNN_AUTH_TOKEN` | unset | Fiber RPC biscuit token |
 | `CCH_SMOKE_FNN_AUTH_TOKEN_FILE` | unset | Fiber RPC biscuit token file |
 
+## GitHub Actions Secret
+
+Fiber RPC 开启 biscuit 鉴权时，需要在 repo 里配置 secret：
+
+```bash
+gh secret set CCH_SMOKE_FNN_AUTH_TOKEN --repo sunchengzhu/cch-daily-smoke
+```
+
+token 需要覆盖本 smoke 用到的 RPC 权限：
+
+```text
+read("info");
+read("channel");
+read("invoice");
+write("invoice");
+read("payment");
+write("payment");
+read("cch");
+write("cch");
+```
+
 ## 验证内容
 
 - CCH `send_btc` order 达到 `Success`。
@@ -80,4 +101,3 @@ make smoke
 - `fiber2` Fiber invoice 变成 `Paid`。
 - `lnd-a` invoice 变成 `SETTLED`。
 - Fiber channel 和 LND channel 的两端余额变化符合本金和 CCH fee。
-

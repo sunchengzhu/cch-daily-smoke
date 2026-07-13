@@ -36,6 +36,7 @@ jobs:
       CCH_SMOKE_AMOUNT_SATS: ${{ github.event.inputs.AmountSats || '100' }}
       CCH_SMOKE_FIBER_CHANNEL_ID: ${{ github.event.inputs.FiberChannelId }}
       CCH_SMOKE_LND_CHANNEL_ID: ${{ github.event.inputs.LndChannelId }}
+      CCH_SMOKE_FNN_AUTH_TOKEN: ${{ secrets.CCH_SMOKE_FNN_AUTH_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +60,10 @@ jobs:
           if [ -n "${CCH_SMOKE_FNN_AUTH_TOKEN_FILE:-}" ]; then
             AUTH_ARGS+=(--auth-token-file "$CCH_SMOKE_FNN_AUTH_TOKEN_FILE")
           fi
+          if [ ${#AUTH_ARGS[@]} -eq 0 ]; then
+            echo "::error::Missing Fiber RPC auth. Set repository secret CCH_SMOKE_FNN_AUTH_TOKEN."
+            exit 1
+          fi
 
           test -x "$CCH_SMOKE_FNN_CLI"
           "$CCH_SMOKE_FNN_CLI" --version || true
@@ -79,4 +84,3 @@ jobs:
         with:
           name: cch-daily-smoke-log
           path: cch-daily-smoke.log
-
