@@ -8,20 +8,12 @@ on:
       AmountSats:
         description: "Amount used by each direction, in sats / mzBTC minimum units"
         default: "100"
-      FiberChannelId:
-        description: "Optional mzBTC channel id between fiber2 and fiber1/CCH"
-        required: false
-      LndChannelId:
-        description: "Optional LND channel id between lnd-a and lnd-b"
-        required: false
 
 permissions:
   contents: read
 
 jobs:
   cch-daily-smoke:
-    # The runner should be installed on test-new-02 or in the same trusted network.
-    # Adjust labels to match the self-hosted runner registration.
     runs-on: [self-hosted, test-new-02]
     timeout-minutes: 20
     env:
@@ -34,8 +26,6 @@ jobs:
       CCH_SMOKE_LND_DIR: /data/.lnd
       CCH_SMOKE_LND_NETWORK: testnet4
       CCH_SMOKE_AMOUNT_SATS: ${{ github.event.inputs.AmountSats || '100' }}
-      CCH_SMOKE_FIBER_CHANNEL_ID: ${{ github.event.inputs.FiberChannelId }}
-      CCH_SMOKE_LND_CHANNEL_ID: ${{ github.event.inputs.LndChannelId }}
       CCH_SMOKE_FNN_AUTH_TOKEN: ${{ secrets.CCH_SMOKE_FNN_AUTH_TOKEN }}
 
     steps:
@@ -47,40 +37,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-
-      - name: Preflight
-        run: |
-          AUTH_ARGS=()
-          if [ -n "${CCH_SMOKE_FNN_AUTH_TOKEN:-}" ]; then
-            AUTH_ARGS+=(--auth-token "$CCH_SMOKE_FNN_AUTH_TOKEN")
-          fi
-          if [ -n "${CCH_SMOKE_FNN_AUTH_TOKEN_FILE:-}" ]; then
-            AUTH_ARGS+=(--auth-token-file "$CCH_SMOKE_FNN_AUTH_TOKEN_FILE")
-          fi
-          if [ ${#AUTH_ARGS[@]} -eq 0 ]; then
-            echo "::error::Missing Fiber RPC auth. Set repository secret CCH_SMOKE_FNN_AUTH_TOKEN."
-            exit 1
-          fi
-
-          test -x "$CCH_SMOKE_FNN_CLI"
-          "$CCH_SMOKE_FNN_CLI" --version || true
-          docker ps --format '{{.Names}}' | grep -E '^(lnd-a|lnd-b)$'
-          "$CCH_SMOKE_FNN_CLI" -u "$CCH_SMOKE_F1_RPC" -o json --no-banner "${AUTH_ARGS[@]}" info >/tmp/cch-smoke-f1-info.json
-          "$CCH_SMOKE_FNN_CLI" -u "$CCH_SMOKE_F2_RPC" -o json --no-banner "${AUTH_ARGS[@]}" info >/tmp/cch-smoke-f2-info.json
-          docker exec "$CCH_SMOKE_LND_A_CONTAINER" lncli --lnddir="$CCH_SMOKE_LND_DIR" --network="$CCH_SMOKE_LND_NETWORK" getinfo >/tmp/cch-smoke-lnd-a-info.json
-          docker exec "$CCH_SMOKE_LND_B_CONTAINER" lncli --lnddir="$CCH_SMOKE_LND_DIR" --network="$CCH_SMOKE_LND_NETWORK" getinfo >/tmp/cch-smoke-lnd-b-info.json
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
 
       - name: Run CCH daily smoke
         run: |
-          set -o pipefail
-          python -m pytest -vv -s | tee cch-daily-smoke.log
-
-      - name: Upload smoke log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: cch-daily-smoke-log
-          path: cch-daily-smoke.log
+          if [ -z "${CCH_SMOKE_FNN_AUTH_TOKEN:-}" ]; then
+            echo "::error::Missing repository secret CCH_SMOKE_FNN_AUTH_TOKEN."
+            exit 1
+          fi
+          python -m pytest -vv -s
