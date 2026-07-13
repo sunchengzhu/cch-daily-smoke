@@ -31,6 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Update and verify Fiber nodes
+        run: scripts/update_fnn.sh
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
         with:

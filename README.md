@@ -93,6 +93,25 @@ read("cch");
 write("cch");
 ```
 
+## FNN 自动更新
+
+每日 smoke 前会运行 `scripts/update_fnn.sh`：
+
+- 从 `nervosnetwork/fiber` 选择发布时间最新的 release，包括 prerelease。
+- 下载当前 Linux 架构对应的 portable 包并校验 GitHub 提供的 SHA-256。
+- 版本无变化时不重启；有变化时先停止 `fiber-testnet1.service` 和
+  `fiber-testnet2.service`。
+- 使用新 `fnn --check-validate` 检查两个节点的数据库。只有确认不需要迁移时，
+  才备份并替换两个节点的 `fnn`，同时更新 node1 的 `fnn-cli`。
+- 启动服务并等待两个 RPC 返回版本、commit 和 pubkey，成功后才运行 smoke。
+- 启动或健康检查失败时恢复旧二进制并重新启动服务。
+
+如果新版本需要数据库迁移，自动更新会在替换前失败并恢复旧服务。数据库迁移必须
+先备份数据，再按照对应版本的 migration guide 手动执行。`v0.9.x` 已内置统一迁移
+系统；只有早于统一迁移 epoch 的数据库才需要使用 `v0.8.x` 的 `fnn-migrate`。
+
+可通过 `CCH_SMOKE_FNN_RELEASE_TAG` 指定发布标签，默认自动选择最新发布版本。
+
 ## 验证内容
 
 - CCH `send_btc` order 达到 `Success`。
