@@ -39,6 +39,7 @@ class CchSmokeConfig:
     lnd_topup_sats: int
     command_timeout: int
     wait_timeout: int
+    debug: bool
 
     @classmethod
     def from_env(cls):
@@ -67,6 +68,10 @@ class CchSmokeConfig:
             lnd_topup_sats=int(os.environ.get("CCH_SMOKE_LND_TOPUP_SATS", "5000")),
             command_timeout=int(os.environ.get("CCH_SMOKE_COMMAND_TIMEOUT", "60")),
             wait_timeout=int(os.environ.get("CCH_SMOKE_WAIT_TIMEOUT", "180")),
+            debug=(
+                os.environ.get("CCH_SMOKE_DEBUG", "").lower()
+                in {"1", "true", "yes"}
+            ),
         )
 
 
@@ -240,7 +245,19 @@ def active_lnd_channel(node_channels, remote_pubkey, channel_id=None):
         and (channel_id is None or channel.get("chan_id") == channel_id)
     ]
     if not matches:
-        pytest.fail(f"no active LND channel found for remote pubkey {remote_pubkey}")
+        available = [
+            {
+                "chan_id": channel.get("chan_id"),
+                "channel_point": channel.get("channel_point"),
+                "remote_pubkey": channel.get("remote_pubkey"),
+                "active": channel.get("active"),
+            }
+            for channel in node_channels.get("channels", [])
+        ]
+        pytest.fail(
+            f"no active LND channel found for remote pubkey {remote_pubkey}; "
+            f"available channels: {json.dumps(available, sort_keys=True)}"
+        )
     return matches[0]
 
 
@@ -332,9 +349,20 @@ def get_fiber_channel(config, minimum_f2_local=0, channel_id=None):
         candidates.append(channel)
 
     if not candidates:
+        available = [
+            {
+                "channel_id": channel.get("channel_id"),
+                "state": state_name(channel),
+                "local_balance": channel.get("local_balance"),
+                "udt_args": (channel.get("funding_udt_type_script") or {}).get(
+                    "args"
+                ),
+            }
+            for channel in channels
+        ]
         pytest.fail(
             "no ready mzBTC Fiber channel from fiber2 to fiber1/CCH; "
-            "set CCH_SMOKE_FIBER_CHANNEL_ID if multiple channels exist"
+            f"available channels: {json.dumps(available, sort_keys=True)}"
         )
     return candidates[0]
 
@@ -347,12 +375,15 @@ def fiber_balances_from_f2_view(config, channel_id):
     }
 
 
-def assert_balance_delta(label, before, after, expected_delta):
+def assert_balance_delta(label, before, after, expected_delta, details=None):
     actual_delta = after - before
-    assert actual_delta == expected_delta, (
+    message = (
         f"{label} balance delta mismatch: before={before}, after={after}, "
         f"actual_delta={actual_delta}, expected_delta={expected_delta}"
     )
+    if details:
+        message += f"; {details}"
+    assert actual_delta == expected_delta, message
 
 
 def print_balance_table(title, unit, rows):
@@ -379,6 +410,7 @@ def print_flow_summary(
     lnd_before,
     lnd_after,
     topup=None,
+    show_channel_details=False,
 ):
     border = "=" * 88
     print(f"\n{border}")
@@ -398,7 +430,8 @@ def print_flow_summary(
             f"(spendable before: {topup['previous_spendable_sats']:,} sats)"
         )
 
-    print(f"\nFiber channel: {fiber_channel_id}")
+    if show_channel_details:
+        print(f"\nFiber channel: {fiber_channel_id}")
     print_balance_table(
         "Fiber balances",
         "mzBTC min units",
@@ -412,8 +445,9 @@ def print_flow_summary(
         ],
     )
 
-    print(f"\nLND channel: {lnd_before['chan_id']}")
-    print(f"LND outpoint: {lnd_before['channel_point']}")
+    if show_channel_details:
+        print(f"\nLND channel: {lnd_before['chan_id']}")
+        print(f"LND outpoint: {lnd_before['channel_point']}")
     print_balance_table(
         "LND balances",
         "sats",
@@ -496,23 +530,38 @@ def test_cch_daily_smoke_bidirectional():
 
     fiber_after = fiber_balances_from_f2_view(config, fiber_channel_id)
     lnd_after = lnd_channel_balances_from_a(config)
+    fiber_details = f"fiber_channel_id={fiber_channel_id}"
+    lnd_details = (
+        f"lnd_channel_id={lnd_before['chan_id']}, "
+        f"lnd_outpoint={lnd_before['channel_point']}"
+    )
     assert_balance_delta(
         "fiber -> lnd fiber2",
         fiber_before["fiber2"],
         fiber_after["fiber2"],
         -send_fiber_amount,
+        fiber_details,
     )
     assert_balance_delta(
         "fiber -> lnd fiber1/CCH",
         fiber_before["fiber1_cch"],
         fiber_after["fiber1_cch"],
         send_fiber_amount,
+        fiber_details,
     )
     assert_balance_delta(
-        "fiber -> lnd lnd-a", lnd_before["lnd_a"], lnd_after["lnd_a"], -amount_sats
+        "fiber -> lnd lnd-a",
+        lnd_before["lnd_a"],
+        lnd_after["lnd_a"],
+        -amount_sats,
+        lnd_details,
     )
     assert_balance_delta(
-        "fiber -> lnd lnd-b", lnd_before["lnd_b"], lnd_after["lnd_b"], amount_sats
+        "fiber -> lnd lnd-b",
+        lnd_before["lnd_b"],
+        lnd_after["lnd_b"],
+        amount_sats,
+        lnd_details,
     )
     print_flow_summary(
         path="FLOW 1: fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b",
@@ -526,6 +575,7 @@ def test_cch_daily_smoke_bidirectional():
         fiber_after=fiber_after,
         lnd_before=lnd_before,
         lnd_after=lnd_after,
+        show_channel_details=config.debug,
     )
 
     # lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2
@@ -553,29 +603,38 @@ def test_cch_daily_smoke_bidirectional():
 
     fiber_after = fiber_balances_from_f2_view(config, fiber_channel_id)
     lnd_after = lnd_channel_balances_from_a(config)
+    fiber_details = f"fiber_channel_id={fiber_channel_id}"
+    lnd_details = (
+        f"lnd_channel_id={lnd_before['chan_id']}, "
+        f"lnd_outpoint={lnd_before['channel_point']}"
+    )
     assert_balance_delta(
         "lnd -> fiber fiber2",
         fiber_before["fiber2"],
         fiber_after["fiber2"],
         receive_fiber_amount,
+        fiber_details,
     )
     assert_balance_delta(
         "lnd -> fiber fiber1/CCH",
         fiber_before["fiber1_cch"],
         fiber_after["fiber1_cch"],
         -receive_fiber_amount,
+        fiber_details,
     )
     assert_balance_delta(
         "lnd -> fiber lnd-a",
         lnd_before["lnd_a"],
         lnd_after["lnd_a"],
         lightning_amount,
+        lnd_details,
     )
     assert_balance_delta(
         "lnd -> fiber lnd-b",
         lnd_before["lnd_b"],
         lnd_after["lnd_b"],
         -lightning_amount,
+        lnd_details,
     )
     print_flow_summary(
         path="FLOW 2: lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2",
@@ -590,6 +649,7 @@ def test_cch_daily_smoke_bidirectional():
         lnd_before=lnd_before,
         lnd_after=lnd_after,
         topup=topup,
+        show_channel_details=config.debug,
     )
 
     print("\nCCH daily smoke completed: both directions passed.")

@@ -70,6 +70,7 @@ make smoke
 | `CCH_SMOKE_LND_TOPUP_SATS` | `5000` | `lnd-b` outbound 不足时，从 `lnd-a` 自动补流动性 |
 | `CCH_SMOKE_FNN_AUTH_TOKEN` | unset | Fiber RPC biscuit token |
 | `CCH_SMOKE_FNN_AUTH_TOKEN_FILE` | unset | Fiber RPC biscuit token file |
+| `CCH_SMOKE_DEBUG` | unset | 设为 `1` 时在成功日志中打印 channel id/outpoint |
 
 ## GitHub Actions Secret
 
