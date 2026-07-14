@@ -1,0 +1,107 @@
+name: cch stability
+
+on:
+  workflow_dispatch:
+    inputs:
+      flow:
+        description: "选择一个完整业务 Flow；两个方向请分别运行"
+        required: true
+        default: fiber-to-lnd
+        type: choice
+        options:
+          - fiber-to-lnd
+          - lnd-to-fiber
+      tps:
+        description: "每秒启动的完整 Flow 数"
+        required: true
+        default: "5"
+        type: string
+      duration_seconds:
+        description: "发压时长；首次建议 300，4 小时为 14400"
+        required: true
+        default: "300"
+        type: string
+      amount_sats:
+        description: "每笔交易本金"
+        required: true
+        default: "100"
+        type: string
+      max_inflight:
+        description: "最大同时在途 Flow 数"
+        required: true
+        default: "100"
+        type: string
+      max_failure_rate:
+        description: "允许的失败比例；默认任意失败都会让 CI 失败"
+        required: true
+        default: "0"
+        type: string
+      update_fnn:
+        description: "测试前是否更新并验证 Fiber 节点"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cch-stability-test-new-02
+  cancel-in-progress: false
+
+jobs:
+  cch-stability:
+    runs-on: [self-hosted, test-new-02]
+    timeout-minutes: 390
+    env:
+      CCH_SMOKE_ENABLED: "1"
+      CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
+      CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
+      CCH_SMOKE_F2_RPC: http://127.0.0.1:8229
+      CCH_SMOKE_LND_A_CONTAINER: lnd-a
+      CCH_SMOKE_LND_B_CONTAINER: lnd-b
+      CCH_SMOKE_LND_DIR: /data/.lnd
+      CCH_SMOKE_LND_NETWORK: testnet4
+      CCH_SMOKE_FNN_AUTH_TOKEN: ${{ secrets.CCH_SMOKE_FNN_AUTH_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Update and verify Fiber nodes
+        if: ${{ inputs.update_fnn }}
+        run: scripts/update_fnn.sh
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Validate configuration
+        run: |
+          if [ -z "${CCH_SMOKE_FNN_AUTH_TOKEN:-}" ]; then
+            echo "::error::Missing repository secret CCH_SMOKE_FNN_AUTH_TOKEN."
+            exit 1
+          fi
+
+      - name: Run fixed-TPS stability test
+        run: |
+          python scripts/run_stability.py \
+            --flow "${{ inputs.flow }}" \
+            --tps "${{ inputs.tps }}" \
+            --duration "${{ inputs.duration_seconds }}" \
+            --amount-sats "${{ inputs.amount_sats }}" \
+            --max-inflight "${{ inputs.max_inflight }}" \
+            --max-failure-rate "${{ inputs.max_failure_rate }}" \
+            --output-dir reports/stability
+
+      - name: Upload stability reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cch-stability-${{ inputs.flow }}-${{ github.run_id }}
+          path: reports/stability/
+          if-no-files-found: warn
+          retention-days: 14
