@@ -137,3 +137,37 @@ write("cch");
 - `fiber2` Fiber invoice 变成 `Paid`。
 - `lnd-a` invoice 变成 `SETTLED`。
 - Fiber channel 和 LND channel 的两端余额变化符合本金和 CCH fee。
+
+## 固定 TPS 稳定性测试
+
+稳定性测试把一个完整业务 Flow 计为一笔交易，两个方向独立运行：
+
+```bash
+# Flow 1: fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b
+python scripts/run_stability.py \
+  --flow fiber-to-lnd \
+  --tps 5 \
+  --duration 300 \
+  --amount-sats 100
+
+# 恢复或重新平衡流动性后，再运行 Flow 2
+python scripts/run_stability.py \
+  --flow lnd-to-fiber \
+  --tps 5 \
+  --duration 300 \
+  --amount-sats 100
+```
+
+`--duration` 单位为秒，4 小时为 `14400`。固定 TPS 指每秒启动的完整
+Flow 数；完成 TPS、成功率和延迟是测试结果。默认最大在途数为 100，超过上限的
+交易会记录成 `MaxInflightExceeded`，不会排队后伪装成按时启动。
+
+控制台每 10 秒输出一次进度，失败交易实时输出错误。完整交易明细写入 JSONL，
+最终报告包含成功数、失败数、拒绝数、实际启动 TPS、完成 TPS、p50/p95/p99
+延迟和错误分类。默认任意失败都会让命令以非零状态退出，也可以通过
+`--max-failure-rate` 设置允许的失败比例。测试过程中不会自动补充流动性；启动前
+会根据目标交易数检查两个资金来源的本金容量，手续费和通道 reserve 仍需额外预留。
+
+GitHub Actions 中可以手动运行 `cch stability`。默认参数是单方向 5 TPS、5 分钟；
+两个方向需要分别触发，并在两次运行之间检查或恢复通道流动性。长稳测试把
+`duration_seconds` 改为 `14400`。
