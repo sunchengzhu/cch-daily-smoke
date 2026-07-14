@@ -51,6 +51,23 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def compact_error(exc: BaseException, max_length: int = 240) -> str:
+    """Return the useful part of a command failure for the console log."""
+    message = str(exc).strip()
+    if "stderr:\n" in message:
+        stderr = message.rsplit("stderr:\n", 1)[1].strip()
+        if stderr:
+            message = stderr
+    message = " ".join(message.split())
+    if len(message) > max_length:
+        return message[: max_length - 3] + "..."
+    return message
+
+
+def seconds(value: float | None) -> str:
+    return "n/a" if value is None else f"{value / 1000:.2f}s"
+
+
 def percentile(values: list[float], percent: float) -> float | None:
     if not values:
         return None
@@ -196,32 +213,10 @@ def log_preflight(
     lnd = lnd_channel_balances_from_a(config)
     required_principal = amount_sats * target_count
 
-    LOG.info(
-        "PREFLIGHT flow=%s target_transactions=%d principal_per_tx=%d "
-        "estimated_principal_total=%d",
-        flow,
-        target_count,
-        amount_sats,
-        required_principal,
-    )
-    LOG.info(
-        "PREFLIGHT fiber_channel=%s fiber2=%d fiber1_cch=%d",
-        channel["channel_id"],
-        fiber2_balance,
-        fiber1_balance,
-    )
-    LOG.info(
-        "PREFLIGHT lnd_channel=%s lnd_a=%d lnd_b=%d",
-        lnd["chan_id"],
-        lnd["lnd_a"],
-        lnd["lnd_b"],
-    )
-
     if flow == FLOW_FIBER_TO_LND and fiber2_balance < amount_sats:
         raise RuntimeError("fiber2 does not have enough balance for even one transaction")
     if flow == FLOW_LND_TO_FIBER:
         spendable = lnd_b_liquidity(config)["spendable_sats"]
-        LOG.info("PREFLIGHT lnd_b_spendable=%d", spendable)
         if spendable < amount_sats:
             raise RuntimeError("lnd-b does not have enough spendable balance for one transaction")
 
@@ -238,9 +233,13 @@ def log_preflight(
             "fees and reserves require additional headroom"
         )
 
-    LOG.warning(
-        "PREFLIGHT capacity is an estimate: fees and channel reserves require extra "
-        "headroom; this runner never tops up liquidity"
+    LOG.info(
+        "PREFLIGHT tx=%d amount=%d required=%d available=%d source=%s",
+        target_count,
+        amount_sats,
+        required_principal,
+        capacity,
+        capacity_sources,
     )
 
 
@@ -300,11 +299,11 @@ def execute_transaction(
             state.failed += 1
             state.errors[error_type] = state.errors.get(error_type, 0) + 1
         LOG.error(
-            "TX failed seq=%d latency_ms=%.1f error_type=%s error=%s",
+            "FAILED seq=%d latency=%.2fs %s: %s",
             sequence,
-            latency_ms,
+            latency_ms / 1000,
             error_type,
-            str(exc).replace("\n", " | "),
+            compact_error(exc),
         )
     finally:
         record["finished_at"] = utc_now()
@@ -463,28 +462,18 @@ def run_load(
                 snapshot = state.snapshot()
                 elapsed = now - load_started_at
                 completed = snapshot["succeeded"] + snapshot["failed"]
-                success_rate = (
-                    snapshot["succeeded"] / completed * 100 if completed else 0.0
-                )
                 LOG.info(
-                    "PROGRESS elapsed=%.1fs scheduled=%d started=%d running=%d "
-                    "succeeded=%d failed=%d rejected=%d start_tps=%.3f "
-                    "success_tps=%.3f success_rate=%.2f%% latency_p95_ms=%s",
-                    elapsed,
+                    "PROGRESS %ds sent=%d/%d done=%d active=%d failed=%d "
+                    "rejected=%d tps=%.2f p95=%s",
+                    round(elapsed),
                     snapshot["scheduled"],
-                    snapshot["started"],
+                    target_count,
+                    completed,
                     snapshot["running"],
-                    snapshot["succeeded"],
                     snapshot["failed"],
                     snapshot["rejected"],
-                    snapshot["started"] / elapsed,
                     snapshot["succeeded"] / elapsed,
-                    success_rate,
-                    (
-                        f"{snapshot['latency_p95_ms']:.1f}"
-                        if snapshot["latency_p95_ms"] is not None
-                        else "n/a"
-                    ),
+                    seconds(snapshot["latency_p95_ms"]),
                 )
                 next_progress = now + args.progress_interval
 
@@ -492,7 +481,7 @@ def run_load(
         if remaining > 0:
             time.sleep(remaining)
         load_finished_at = time.monotonic()
-        LOG.info("DRAIN load generation finished; waiting for %d submitted tasks", len(futures))
+        LOG.info("DRAIN waiting_for=%d", len(futures))
         wait(futures)
 
     finished_at = time.monotonic()
@@ -500,7 +489,21 @@ def run_load(
         args, run_id, state, load_started_at, load_finished_at, finished_at
     )
     writer.write(summary)
-    LOG.info("SUMMARY %s", json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    LOG.info(
+        "RESULT %s succeeded=%d/%d failed=%d rejected=%d failure_rate=%.3f%% "
+        "tps=%.2f p50=%s p95=%s wall=%.1fs errors=%s",
+        "PASS" if summary["passed"] else "FAIL",
+        summary["succeeded"],
+        summary["scheduled"],
+        summary["failed"],
+        summary["rejected"],
+        summary["failure_rate"] * 100,
+        summary["successful_completion_tps_wall"],
+        seconds(summary["latency_ms"]["p50"]),
+        seconds(summary["latency_ms"]["p95"]),
+        summary["wall_duration_seconds"],
+        summary["errors"] or "none",
+    )
     return summary
 
 
@@ -537,8 +540,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(threadName)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S%z",
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
     )
     os.environ.setdefault("CCH_SMOKE_ENABLED", "1")
     if args.amount_sats is not None:

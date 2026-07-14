@@ -80,7 +80,12 @@ class CchSmokeConfig:
 def run_cmd(args, timeout):
     result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
-        command = " ".join(shlex.quote(str(a)) for a in args)
+        safe_args = list(args)
+        if "--auth-token" in safe_args:
+            token_index = safe_args.index("--auth-token") + 1
+            if token_index < len(safe_args):
+                safe_args[token_index] = "***"
+        command = " ".join(shlex.quote(str(a)) for a in safe_args)
         raise AssertionError(
             f"command failed ({result.returncode}): {command}\n"
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
