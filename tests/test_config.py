@@ -12,3 +12,4 @@ def test_blank_channel_ids_enable_auto_discovery(monkeypatch):
 
     assert config.channel_id is None
     assert config.lnd_channel_id is None
+    assert config.lnd_topup_sats == 3_000_000

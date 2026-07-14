@@ -72,7 +72,8 @@ make smoke
 | `CCH_SMOKE_FIBER_CHANNEL_ID` | unset | 多条 mzBTC channel 时指定目标 channel |
 | `CCH_SMOKE_LND_CHANNEL_ID` | unset | 多条 LND channel 时指定目标 channel |
 | `CCH_SMOKE_LND_NETWORK` | `testnet4` | LND bitcoin network |
-| `CCH_SMOKE_LND_TOPUP_SATS` | `5000` | `lnd-b` outbound 不足时，从 `lnd-a` 自动补流动性 |
+| `CCH_SMOKE_LND_MIN_SPENDABLE_SATS` | `1000000` | 独立 CI 流动性步骤要求 `lnd-b` 至少保有的可支付余额 |
+| `CCH_SMOKE_LND_TOPUP_SATS` | `3000000` | `lnd-b` outbound 不足时，从 `lnd-a` 一次补充的最小流动性缓冲；实际补充量至少覆盖 channel reserve 与本次支付缺口 |
 | `CCH_SMOKE_FNN_AUTH_TOKEN` | unset | Fiber RPC biscuit token |
 | `CCH_SMOKE_FNN_AUTH_TOKEN_FILE` | unset | Fiber RPC biscuit token file |
 | `CCH_SMOKE_DEBUG` | unset | 设为 `1` 时在成功日志中打印 channel id/outpoint |
@@ -84,6 +85,16 @@ Fiber RPC 开启 biscuit 鉴权时，需要在 repo 里配置 secret：
 ```bash
 gh secret set CCH_SMOKE_FNN_AUTH_TOKEN --repo sunchengzhu/cch-daily-smoke
 ```
+
+CI 在 smoke 前通过独立的 `Ensure LND outbound liquidity` 步骤检查流动性：
+
+```bash
+python scripts/ensure_lnd_liquidity.py
+```
+
+当 `lnd-b` 可支付余额低于 `CCH_SMOKE_LND_MIN_SPENDABLE_SATS` 时，该步骤从
+`lnd-a` 一次转入至少 `CCH_SMOKE_LND_TOPUP_SATS`；业务 smoke 本身不会再补充或
+改变额外流动性，因此两个步骤的失败和日志彼此独立。
 
 token 需要覆盖本 smoke 用到的 RPC 权限：
 

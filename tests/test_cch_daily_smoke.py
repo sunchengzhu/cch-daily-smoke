@@ -65,7 +65,9 @@ class CchSmokeConfig:
             lnd_network=os.environ.get("CCH_SMOKE_LND_NETWORK", "testnet4"),
             channel_id=os.environ.get("CCH_SMOKE_FIBER_CHANNEL_ID") or None,
             lnd_channel_id=os.environ.get("CCH_SMOKE_LND_CHANNEL_ID") or None,
-            lnd_topup_sats=int(os.environ.get("CCH_SMOKE_LND_TOPUP_SATS", "5000")),
+            lnd_topup_sats=int(
+                os.environ.get("CCH_SMOKE_LND_TOPUP_SATS", "3000000")
+            ),
             command_timeout=int(os.environ.get("CCH_SMOKE_COMMAND_TIMEOUT", "60")),
             wait_timeout=int(os.environ.get("CCH_SMOKE_WAIT_TIMEOUT", "180")),
             debug=(
@@ -276,7 +278,7 @@ def lnd_channel_balances_from_a(config):
     }
 
 
-def lnd_b_spendable_sats(config):
+def lnd_b_liquidity(config):
     lnd_a_pubkey = lncli_json(config, "lnd-a", ["getinfo"])["identity_pubkey"]
     channel = active_lnd_channel(
         lncli_json(config, "lnd-b", ["listchannels"]),
@@ -285,7 +287,11 @@ def lnd_b_spendable_sats(config):
     )
     local_balance = int(channel["local_balance"])
     reserve = int(channel.get("local_chan_reserve_sat") or 0)
-    return max(0, local_balance - reserve)
+    return {
+        "local_balance": local_balance,
+        "reserve_sats": reserve,
+        "spendable_sats": max(0, local_balance - reserve),
+    }
 
 
 def add_lnd_invoice(config, node_name, amount_sats, memo):
@@ -306,11 +312,24 @@ def pay_lnd_invoice(config, node_name, pay_req):
 
 
 def top_up_lnd_b_if_needed(config, needed_sats):
-    spendable = lnd_b_spendable_sats(config)
+    liquidity = lnd_b_liquidity(config)
+    spendable = liquidity["spendable_sats"]
     if spendable >= needed_sats:
         return None
 
-    topup_sats = max(config.lnd_topup_sats, needed_sats - spendable)
+    reserve_shortfall = max(
+        0,
+        liquidity["reserve_sats"] + needed_sats - liquidity["local_balance"],
+    )
+    topup_sats = max(config.lnd_topup_sats, reserve_shortfall)
+    print(
+        "[lnd-topup] insufficient lnd-b outbound liquidity: "
+        f"local={liquidity['local_balance']:,} sats, "
+        f"reserve={liquidity['reserve_sats']:,} sats, "
+        f"spendable={spendable:,} sats, needed={needed_sats:,} sats; "
+        f"transferring {topup_sats:,} sats from lnd-a",
+        flush=True,
+    )
     invoice = add_lnd_invoice(
         config,
         "lnd-b",
@@ -319,7 +338,25 @@ def top_up_lnd_b_if_needed(config, needed_sats):
     )
     pay_lnd_invoice(config, "lnd-a", invoice["payment_request"])
     wait_lnd_invoice_settled(config, "lnd-b", invoice["r_hash"], topup_sats)
-    return {"amount_sats": topup_sats, "previous_spendable_sats": spendable}
+    updated = lnd_b_liquidity(config)
+    print(
+        "[lnd-topup] completed: "
+        f"local={updated['local_balance']:,} sats, "
+        f"reserve={updated['reserve_sats']:,} sats, "
+        f"spendable={updated['spendable_sats']:,} sats",
+        flush=True,
+    )
+    if updated["spendable_sats"] < needed_sats:
+        raise AssertionError(
+            "lnd-b outbound liquidity is still insufficient after top-up: "
+            f"spendable={updated['spendable_sats']} sats, needed={needed_sats} sats"
+        )
+    return {
+        "amount_sats": topup_sats,
+        "previous_spendable_sats": spendable,
+        "updated_spendable_sats": updated["spendable_sats"],
+        "reserve_sats": liquidity["reserve_sats"],
+    }
 
 
 def f1_pubkey(config):
@@ -417,7 +454,6 @@ def print_flow_summary(
     fiber_after,
     lnd_before,
     lnd_after,
-    topup=None,
     show_channel_details=False,
 ):
     border = "=" * 88
@@ -432,12 +468,6 @@ def print_flow_summary(
     print(f"CCH fee              : {cch_fee_sats:,} sats")
     print(f"Source paid          : {source_paid}")
     print(f"Destination received : {destination_received}")
-    if topup:
-        print(
-            f"LND liquidity top-up : {topup['amount_sats']:,} sats "
-            f"(spendable before: {topup['previous_spendable_sats']:,} sats)"
-        )
-
     if show_channel_details:
         print(f"\nFiber channel: {fiber_channel_id}")
     print_balance_table(
@@ -601,7 +631,6 @@ def test_cch_daily_smoke_bidirectional():
     assert receive_fiber_amount == amount_sats
     lightning_amount = receive_fiber_amount + receive_fee_sats
 
-    topup = top_up_lnd_b_if_needed(config, lightning_amount)
     fiber_before = fiber_balances_from_f2_view(config, fiber_channel_id)
     lnd_before = lnd_channel_balances_from_a(config)
     pay_lnd_invoice(config, "lnd-b", receive_order["incoming_invoice"]["Lightning"])
@@ -657,7 +686,6 @@ def test_cch_daily_smoke_bidirectional():
         fiber_after=fiber_after,
         lnd_before=lnd_before,
         lnd_after=lnd_after,
-        topup=topup,
         show_channel_details=config.debug,
     )
 
