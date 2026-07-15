@@ -52,12 +52,11 @@ CCH_SMOKE_F1_RPC=http://127.0.0.1:8227 \
 CCH_SMOKE_F2_RPC=http://127.0.0.1:8229 \
 CCH_SMOKE_LND_A_CONTAINER=lnd-a \
 CCH_SMOKE_LND_B_CONTAINER=lnd-b \
-CCH_SMOKE_AMOUNT_SATS=100 \
 python -m pytest -vv -s
 ```
 
-其中 `CCH_SMOKE_AMOUNT_SATS=100` 表示每条路径的本金为
-`100 sats ↔ 100 mzBTC units`，CCH fee 另计。
+Daily smoke 固定使用 `100 sats ↔ 100 mzBTC units` 作为每条路径的本金，
+CCH fee 另计。稳定性测试仍可通过 `amount_sats` 单独设置每笔本金。
 
 也可以：
 

@@ -15,6 +15,7 @@ MZBTC_SCRIPT = {
     "hash_type": "type",
     "args": "0x7275c8fb7feb81d22a47aa582c4f2487d771a1933957fe8fee9b363603487b1a00000000",
 }
+DAILY_SMOKE_AMOUNT_SATS = 100
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("CCH_SMOKE_ENABLED") != "1",
@@ -80,7 +81,12 @@ class CchSmokeConfig:
 def run_cmd(args, timeout):
     result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
-        command = " ".join(shlex.quote(str(a)) for a in args)
+        safe_args = list(args)
+        if "--auth-token" in safe_args:
+            token_index = safe_args.index("--auth-token") + 1
+            if token_index < len(safe_args):
+                safe_args[token_index] = "***"
+        command = " ".join(shlex.quote(str(a)) for a in safe_args)
         raise AssertionError(
             f"command failed ({result.returncode}): {command}\n"
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -518,8 +524,7 @@ def create_fiber_invoice(config, amount_sats):
 
 def test_cch_daily_smoke_bidirectional():
     config = CchSmokeConfig.from_env()
-    amount_sats = config.amount_sats
-    assert amount_sats > 0
+    amount_sats = DAILY_SMOKE_AMOUNT_SATS
     print_asset_convention()
 
     channel = get_fiber_channel(config)

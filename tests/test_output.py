@@ -1,3 +1,5 @@
+from subprocess import CompletedProcess
+
 import pytest
 
 from test_cch_daily_smoke import (
@@ -6,6 +8,7 @@ from test_cch_daily_smoke import (
     format_mzbtc,
     print_asset_convention,
     print_flow_summary,
+    run_cmd,
 )
 
 
@@ -107,3 +110,18 @@ def test_channel_selection_failure_lists_available_channels():
 
     with pytest.raises(pytest.fail.Exception, match="lnd-channel"):
         active_lnd_channel(channels, remote_pubkey="expected-peer")
+
+
+def test_failed_command_redacts_auth_token(monkeypatch):
+    monkeypatch.setattr(
+        "test_cch_daily_smoke.subprocess.run",
+        lambda *args, **kwargs: CompletedProcess(
+            args=args[0], returncode=1, stdout="", stderr="Unauthorized"
+        ),
+    )
+
+    with pytest.raises(AssertionError) as error:
+        run_cmd(["fnn", "--auth-token", "secret-token", "info"], timeout=1)
+
+    assert "secret-token" not in str(error.value)
+    assert "--auth-token '***'" in str(error.value)
