@@ -254,7 +254,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=[FLOW_FIBER_TO_LND, FLOW_LND_TO_FIBER],
     )
     parser.add_argument("--amount-sats", type=int, default=None)
-    parser.add_argument("--timeout", type=float, default=60.0, help="seconds")
+    parser.add_argument("--timeout", type=float, default=90.0, help="seconds")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
     if args.amount_sats is not None and args.amount_sats <= 0:

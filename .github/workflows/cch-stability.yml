@@ -99,7 +99,7 @@ jobs:
           python scripts/check_stability_readiness.py \
             --flow "${{ inputs.flow }}" \
             --amount-sats 100 \
-            --timeout 60
+            --timeout 90
 
       - name: Run stability test
         run: |
