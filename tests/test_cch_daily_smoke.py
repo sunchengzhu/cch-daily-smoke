@@ -15,6 +15,7 @@ MZBTC_SCRIPT = {
     "hash_type": "type",
     "args": "0x7275c8fb7feb81d22a47aa582c4f2487d771a1933957fe8fee9b363603487b1a00000000",
 }
+DAILY_SMOKE_AMOUNT_SATS = 100
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("CCH_SMOKE_ENABLED") != "1",
@@ -523,8 +524,7 @@ def create_fiber_invoice(config, amount_sats):
 
 def test_cch_daily_smoke_bidirectional():
     config = CchSmokeConfig.from_env()
-    amount_sats = config.amount_sats
-    assert amount_sats > 0
+    amount_sats = DAILY_SMOKE_AMOUNT_SATS
     print_asset_convention()
 
     channel = get_fiber_channel(config)

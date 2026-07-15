@@ -4,10 +4,6 @@ on:
   schedule:
     - cron: "0 2 * * *" # 10:00 Asia/Shanghai
   workflow_dispatch:
-    inputs:
-      AmountSats:
-        description: "每条路径本金：N sats ↔ N mzBTC units"
-        default: "100"
 
 permissions:
   contents: read
@@ -25,7 +21,6 @@ jobs:
       CCH_SMOKE_LND_B_CONTAINER: lnd-b
       CCH_SMOKE_LND_DIR: /data/.lnd
       CCH_SMOKE_LND_NETWORK: testnet4
-      CCH_SMOKE_AMOUNT_SATS: ${{ github.event.inputs.AmountSats || '100' }}
       CCH_SMOKE_LND_MIN_SPENDABLE_SATS: "1000000"
       CCH_SMOKE_LND_TOPUP_SATS: "3000000"
       CCH_SMOKE_FNN_AUTH_TOKEN: ${{ secrets.CCH_SMOKE_FNN_AUTH_TOKEN }}
