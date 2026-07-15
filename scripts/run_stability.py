@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -53,6 +54,24 @@ def utc_now() -> str:
 
 def compact_error(exc: BaseException, max_length: int = 240) -> str:
     """Return the useful part of a command failure for the console log."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        command = exc.cmd
+        label = "command"
+        if isinstance(command, (list, tuple)):
+            tokens = [str(token) for token in command]
+            if len(tokens) >= 4 and tokens[:2] == ["docker", "exec"]:
+                container = tokens[2]
+                tool = Path(tokens[3]).name
+                action = next(
+                    (token for token in tokens[4:] if not token.startswith("-")),
+                    None,
+                )
+                label = " ".join(part for part in (container, action or tool) if part)
+            elif tokens:
+                label = Path(tokens[0]).name
+        timeout = f"{float(exc.timeout):g}"
+        return f"{label} timed out after {timeout}s"
+
     message = str(exc).strip()
     if "stderr:\n" in message:
         stderr = message.rsplit("stderr:\n", 1)[1].strip()
@@ -292,7 +311,7 @@ def execute_transaction(
             status="failed",
             latency_ms=round(latency_ms, 3),
             error_type=error_type,
-            error=str(exc),
+            error=compact_error(exc),
             traceback="".join(traceback.format_exception(exc)),
         )
         with state.lock:
@@ -399,6 +418,7 @@ def run_load(
     load_started_at = time.monotonic()
     deadline = load_started_at + args.duration
     next_progress = load_started_at + args.progress_interval
+    saturated_since: float | None = None
 
     with ThreadPoolExecutor(
         max_workers=args.max_inflight, thread_name_prefix="cch-flow"
@@ -417,6 +437,7 @@ def run_load(
                 state.scheduled += 1
 
             if not limiter.acquire(blocking=False):
+                rejected_at = time.monotonic()
                 with state.lock:
                     state.rejected += 1
                     state.errors["MaxInflightExceeded"] = (
@@ -434,11 +455,15 @@ def run_load(
                         "finished_at": utc_now(),
                     }
                 )
-                LOG.error(
-                    "TX rejected seq=%d reason=max_inflight limit=%d",
-                    sequence,
-                    args.max_inflight,
-                )
+                if saturated_since is None:
+                    saturated_since = rejected_at
+                    LOG.warning(
+                        "SATURATED active=%d limit=%d first_rejected_seq=%d; "
+                        "further rejections are counted in PROGRESS",
+                        args.max_inflight,
+                        args.max_inflight,
+                        sequence,
+                    )
             else:
                 futures.add(
                     executor.submit(
@@ -462,9 +487,25 @@ def run_load(
                 snapshot = state.snapshot()
                 elapsed = now - load_started_at
                 completed = snapshot["succeeded"] + snapshot["failed"]
+                if (
+                    saturated_since is not None
+                    and snapshot["running"] <= int(args.max_inflight * 0.8)
+                ):
+                    LOG.info(
+                        "RECOVERED active=%d limit=%d saturated_for=%.1fs",
+                        snapshot["running"],
+                        args.max_inflight,
+                        now - saturated_since,
+                    )
+                    saturated_since = None
+                saturation = (
+                    f"{now - saturated_since:.0f}s"
+                    if saturated_since is not None
+                    else "no"
+                )
                 LOG.info(
                     "PROGRESS %ds sent=%d/%d done=%d active=%d failed=%d "
-                    "rejected=%d tps=%.2f p95=%s",
+                    "rejected=%d saturated=%s tps=%.2f p95=%s",
                     round(elapsed),
                     snapshot["scheduled"],
                     target_count,
@@ -472,6 +513,7 @@ def run_load(
                     snapshot["running"],
                     snapshot["failed"],
                     snapshot["rejected"],
+                    saturation,
                     snapshot["succeeded"] / elapsed,
                     seconds(snapshot["latency_p95_ms"]),
                 )

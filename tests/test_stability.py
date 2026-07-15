@@ -1,5 +1,6 @@
 import argparse
 import logging
+import subprocess
 import time
 
 from scripts.run_stability import (
@@ -27,6 +28,28 @@ def test_compact_error_prefers_stderr_and_truncates():
 
     assert compact_error(error) == "Error: RPC error: Unauthorized"
     assert compact_error(AssertionError("x" * 20), max_length=10) == "xxxxxxx..."
+
+
+def test_compact_error_redacts_invoice_from_timeout():
+    error = subprocess.TimeoutExpired(
+        [
+            "docker",
+            "exec",
+            "lnd-b",
+            "lncli",
+            "--lnddir=/data/.lnd",
+            "--network=testnet4",
+            "payinvoice",
+            "lntb-secret-invoice",
+            "--force",
+        ],
+        120,
+    )
+
+    message = compact_error(error)
+
+    assert message == "lnd-b payinvoice timed out after 120s"
+    assert "lntb-secret-invoice" not in message
 
 
 def test_seconds_formats_milliseconds_for_console():
@@ -117,3 +140,33 @@ def test_load_runner_logs_compact_progress_and_result(monkeypatch, tmp_path, cap
     assert any(message.startswith("PROGRESS ") for message in messages)
     assert any(message.startswith("RESULT PASS ") for message in messages)
     assert not any(message.startswith("SUMMARY {") for message in messages)
+
+
+def test_load_runner_logs_saturation_once(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr("scripts.run_stability.log_preflight", lambda *args: None)
+    args = argparse.Namespace(
+        flow="fiber-to-lnd",
+        tps=100.0,
+        duration=0.05,
+        amount_sats=100,
+        max_inflight=1,
+        progress_interval=0.01,
+        max_failure_rate=0.0,
+    )
+
+    def slow_flow(config, amount_sats, transaction_name):
+        del config, amount_sats, transaction_name
+        time.sleep(0.1)
+        return {"payment_hash": "fake"}
+
+    writer = JsonlWriter(tmp_path / "details.jsonl")
+    try:
+        with caplog.at_level(logging.INFO, logger="cch-stability"):
+            summary = run_load(args, object(), writer, slow_flow)
+    finally:
+        writer.close()
+
+    messages = [record.message for record in caplog.records]
+    assert summary["rejected"] == 4
+    assert sum(message.startswith("SATURATED ") for message in messages) == 1
+    assert not any(message.startswith("TX rejected ") for message in messages)
