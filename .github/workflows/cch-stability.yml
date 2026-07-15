@@ -11,8 +11,16 @@ on:
         options:
           - fiber-to-lnd
           - lnd-to-fiber
+      load_mode:
+        description: "负载模式：固定 TPS 并发，或等待上一笔完成后再发下一笔"
+        required: true
+        default: fixed-tps
+        type: choice
+        options:
+          - fixed-tps
+          - sequential
       tps:
-        description: "每秒启动的完整 Flow 数"
+        description: "每秒启动的完整 Flow 数；仅 fixed-tps 模式生效"
         required: true
         default: "5"
         type: string
@@ -27,7 +35,7 @@ on:
         default: "100"
         type: string
       max_inflight:
-        description: "最大同时在途 Flow 数"
+        description: "最大同时在途 Flow 数；仅 fixed-tps 模式生效"
         required: true
         default: "100"
         type: string
@@ -86,10 +94,11 @@ jobs:
             exit 1
           fi
 
-      - name: Run fixed-TPS stability test
+      - name: Run stability test
         run: |
           python scripts/run_stability.py \
             --flow "${{ inputs.flow }}" \
+            --mode "${{ inputs.load_mode }}" \
             --tps "${{ inputs.tps }}" \
             --duration "${{ inputs.duration_seconds }}" \
             --amount-sats "${{ inputs.amount_sats }}" \
@@ -105,4 +114,5 @@ jobs:
             --flow "${{ inputs.flow }}" \
             --target-tps "${{ inputs.tps }}" \
             --duration "${{ inputs.duration_seconds }}" \
+            --mode "${{ inputs.load_mode }}" \
             --github-summary "$GITHUB_STEP_SUMMARY"

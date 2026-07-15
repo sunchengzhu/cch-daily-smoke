@@ -60,7 +60,11 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]
 
 
 def partial_summary(
-    transactions: list[dict[str, Any]], flow: str, target_tps: float, duration: float
+    transactions: list[dict[str, Any]],
+    flow: str,
+    target_tps: float,
+    duration: float,
+    mode: str = "fixed-tps",
 ) -> dict[str, Any]:
     statuses = Counter(record.get("status", "unknown") for record in transactions)
     errors = Counter(
@@ -74,12 +78,15 @@ def partial_summary(
         if record.get("latency_ms") is not None
     ]
     recorded = len(transactions)
-    target_transactions = math.ceil(target_tps * duration)
+    target_transactions = (
+        math.ceil(target_tps * duration) if mode == "fixed-tps" else None
+    )
     unsuccessful = statuses["failed"] + statuses["rejected"]
     return {
         "type": "summary",
         "flow": flow,
-        "target_tps": target_tps,
+        "load_mode": mode,
+        "target_tps": target_tps if mode == "fixed-tps" else None,
         "configured_duration_seconds": duration,
         "target_transactions": target_transactions,
         "recorded_transactions": recorded,
@@ -109,12 +116,17 @@ def normalized_summary(
     flow: str,
     target_tps: float,
     duration: float,
+    mode: str = "fixed-tps",
 ) -> dict[str, Any]:
     if existing is None:
-        return partial_summary(transactions, flow, target_tps, duration)
+        return partial_summary(transactions, flow, target_tps, duration, mode)
 
     summary = dict(existing)
-    summary.setdefault("target_transactions", math.ceil(target_tps * duration))
+    summary.setdefault("load_mode", mode)
+    summary.setdefault(
+        "target_transactions",
+        math.ceil(target_tps * duration) if mode == "fixed-tps" else None,
+    )
     summary.setdefault("recorded_transactions", len(transactions))
     completed_load = "scheduled" in summary
     summary["partial"] = not completed_load
@@ -153,6 +165,7 @@ def summary_markdown(summary: dict[str, Any]) -> str:
     rows = [
         ("Result", result),
         ("Flow", summary.get("flow")),
+        ("Load mode", summary.get("load_mode")),
         ("Target TPS", summary.get("target_tps")),
         ("Target transactions", summary.get("target_transactions")),
         ("Recorded transactions", summary.get("recorded_transactions", summary.get("scheduled"))),
@@ -191,10 +204,11 @@ def build_artifacts(
     flow: str,
     target_tps: float,
     duration: float,
+    mode: str = "fixed-tps",
 ) -> dict[str, Path]:
     transactions, existing_summary = read_jsonl(jsonl_path)
     summary = normalized_summary(
-        existing_summary, transactions, flow, target_tps, duration
+        existing_summary, transactions, flow, target_tps, duration, mode
     )
     base = jsonl_path.with_suffix("")
     paths = {
@@ -223,6 +237,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flow", required=True)
     parser.add_argument("--target-tps", type=float, required=True)
     parser.add_argument("--duration", type=float, required=True)
+    parser.add_argument(
+        "--mode", choices=["fixed-tps", "sequential"], default="fixed-tps"
+    )
     parser.add_argument("--github-summary", type=Path)
     return parser.parse_args()
 
@@ -236,7 +253,7 @@ def main() -> int:
 
     for jsonl_path in jsonl_files:
         paths = build_artifacts(
-            jsonl_path, args.flow, args.target_tps, args.duration
+            jsonl_path, args.flow, args.target_tps, args.duration, args.mode
         )
         if args.github_summary:
             with args.github_summary.open("a", encoding="utf-8") as destination:

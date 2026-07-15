@@ -7,6 +7,7 @@ import pytest
 
 from scripts.run_stability import (
     JsonlWriter,
+    MODE_SEQUENTIAL,
     RunState,
     build_summary,
     compact_error,
@@ -200,6 +201,49 @@ def test_load_runner_starts_complete_flows_at_target_tps(monkeypatch, tmp_path):
     assert summary["succeeded"] == 2
     assert 4.8 <= summary["actual_start_tps"] <= 5.1
     assert summary["passed"] is True
+
+
+def test_sequential_mode_waits_for_each_flow_before_starting_next(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("scripts.run_stability.log_preflight", lambda *args: None)
+    args = argparse.Namespace(
+        flow="lnd-to-fiber",
+        mode=MODE_SEQUENTIAL,
+        tps=100.0,
+        duration=0.12,
+        amount_sats=100,
+        max_inflight=100,
+        progress_interval=0.05,
+        max_failure_rate=0.0,
+    )
+    active = 0
+    max_active = 0
+
+    def fake_flow(config, amount_sats, transaction_name):
+        nonlocal active, max_active
+        del config, amount_sats, transaction_name
+        active += 1
+        max_active = max(max_active, active)
+        time.sleep(0.03)
+        active -= 1
+        return {"payment_hash": "fake"}
+
+    writer = JsonlWriter(tmp_path / "details.jsonl")
+    try:
+        summary = run_load(args, object(), writer, fake_flow)
+    finally:
+        writer.close()
+
+    assert 3 <= summary["scheduled"] <= 5
+    assert summary["started"] == summary["scheduled"]
+    assert summary["succeeded"] == summary["scheduled"]
+    assert summary["rejected"] == 0
+    assert summary["load_mode"] == "sequential"
+    assert summary["target_tps"] is None
+    assert summary["target_transactions"] is None
+    assert summary["max_inflight"] == 1
+    assert max_active == 1
 
 
 def test_load_runner_logs_compact_progress_and_result(monkeypatch, tmp_path, caplog):

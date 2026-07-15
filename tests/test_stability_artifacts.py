@@ -77,3 +77,17 @@ def test_completed_summary_is_preserved_and_failures_are_separate(tmp_path):
     assert len(failures) == 1
     assert failures[0]["sequence"] == "2"
     assert failures[0]["error"] == "boom"
+
+
+def test_sequential_partial_report_has_no_target_tps_or_transaction_count(tmp_path):
+    source = tmp_path / "lnd-to-fiber-run.jsonl"
+    write_jsonl(source, [transaction(1)])
+
+    paths = build_artifacts(source, "lnd-to-fiber", 5, 300, "sequential")
+    summary = json.loads(paths["summary_json"].read_text(encoding="utf-8"))
+    markdown = paths["summary_md"].read_text(encoding="utf-8")
+
+    assert summary["load_mode"] == "sequential"
+    assert summary["target_tps"] is None
+    assert summary["target_transactions"] is None
+    assert "| Load mode | sequential |" in markdown

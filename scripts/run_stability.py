@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one CCH business flow at a fixed arrival rate."""
+"""Run one CCH business flow at a fixed arrival rate or sequentially."""
 
 from __future__ import annotations
 
@@ -48,6 +48,8 @@ from test_cch_daily_smoke import (  # noqa: E402
 LOG = logging.getLogger("cch-stability")
 FLOW_FIBER_TO_LND = "fiber-to-lnd"
 FLOW_LND_TO_FIBER = "lnd-to-fiber"
+MODE_FIXED_TPS = "fixed-tps"
+MODE_SEQUENTIAL = "sequential"
 
 
 def utc_now() -> str:
@@ -383,6 +385,7 @@ def build_summary(
     load_finished_at: float,
     finished_at: float,
 ) -> dict[str, Any]:
+    mode = getattr(args, "mode", MODE_FIXED_TPS)
     with state.lock:
         total_unsuccessful = state.failed + state.rejected
         failure_rate = total_unsuccessful / state.scheduled if state.scheduled else 1.0
@@ -392,11 +395,17 @@ def build_summary(
             "type": "summary",
             "run_id": run_id,
             "flow": args.flow,
-            "target_tps": args.tps,
+            "load_mode": mode,
+            "target_tps": args.tps if mode == MODE_FIXED_TPS else None,
+            "target_transactions": (
+                math.ceil(args.duration * args.tps)
+                if mode == MODE_FIXED_TPS
+                else None
+            ),
             "configured_duration_seconds": args.duration,
             "load_duration_seconds": round(load_seconds, 3),
             "wall_duration_seconds": round(wall_seconds, 3),
-            "max_inflight": args.max_inflight,
+            "max_inflight": args.max_inflight if mode == MODE_FIXED_TPS else 1,
             "scheduled": state.scheduled,
             "started": state.started,
             "succeeded": state.succeeded,
@@ -433,12 +442,133 @@ def build_summary(
         }
 
 
+def finish_load(
+    args: argparse.Namespace,
+    run_id: str,
+    state: RunState,
+    writer: JsonlWriter,
+    load_started_at: float,
+    load_finished_at: float,
+    finished_at: float,
+) -> dict[str, Any]:
+    summary = build_summary(
+        args, run_id, state, load_started_at, load_finished_at, finished_at
+    )
+    writer.write(summary)
+    LOG.info(
+        "RESULT %s mode=%s succeeded=%d/%d failed=%d rejected=%d "
+        "failure_rate=%.3f%% success_tps=%.2f success_p50=%s "
+        "success_p95=%s wall=%.1fs errors=%s",
+        "PASS" if summary["passed"] else "FAIL",
+        summary["load_mode"],
+        summary["succeeded"],
+        summary["scheduled"],
+        summary["failed"],
+        summary["rejected"],
+        summary["failure_rate"] * 100,
+        summary["successful_completion_tps_wall"],
+        seconds(summary["latency_ms"]["p50"]),
+        seconds(summary["latency_ms"]["p95"]),
+        summary["wall_duration_seconds"],
+        summary["errors"] or "none",
+    )
+    return summary
+
+
+def run_sequential_load(
+    args: argparse.Namespace,
+    config: CchSmokeConfig,
+    writer: JsonlWriter,
+    flow_fn: Callable[[CchSmokeConfig, int, str], dict[str, Any]],
+) -> dict[str, Any]:
+    state = RunState()
+    limiter = threading.BoundedSemaphore(1)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_preflight(config, args.flow, args.amount_sats, 1)
+
+    LOG.info(
+        "START run_id=%s flow=%s mode=%s duration_seconds=%.3f "
+        "concurrency=1 scheduling=next-flow-after-completion",
+        run_id,
+        args.flow,
+        MODE_SEQUENTIAL,
+        args.duration,
+    )
+
+    load_started_at = time.monotonic()
+    deadline = load_started_at + args.duration
+    next_progress = load_started_at + args.progress_interval
+
+    def log_progress(now: float) -> None:
+        nonlocal next_progress
+        snapshot = state.snapshot()
+        completed = snapshot["succeeded"] + snapshot["failed"]
+        elapsed = now - load_started_at
+        LOG.info(
+            "PROGRESS %ds mode=%s sent=%d done=%d active=%d failed=%d "
+            "success_tps=%.2f success_p95=%s",
+            round(elapsed),
+            MODE_SEQUENTIAL,
+            snapshot["scheduled"],
+            completed,
+            snapshot["running"],
+            snapshot["failed"],
+            snapshot["succeeded"] / elapsed,
+            seconds(snapshot["latency_p95_ms"]),
+        )
+        next_progress = now + args.progress_interval
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="cch-flow") as executor:
+        sequence = 0
+        while time.monotonic() < deadline:
+            sequence += 1
+            scheduled_at = time.monotonic()
+            with state.lock:
+                state.scheduled += 1
+            limiter.acquire()
+            future = executor.submit(
+                execute_transaction,
+                sequence,
+                scheduled_at,
+                run_id,
+                args.flow,
+                config,
+                args.amount_sats,
+                state,
+                writer,
+                limiter,
+                flow_fn,
+            )
+            while not future.done():
+                now = time.monotonic()
+                wait({future}, timeout=max(0.01, next_progress - now))
+                now = time.monotonic()
+                if now >= next_progress:
+                    log_progress(now)
+            now = time.monotonic()
+            if now >= next_progress:
+                log_progress(now)
+
+    return finish_load(
+        args,
+        run_id,
+        state,
+        writer,
+        load_started_at,
+        deadline,
+        time.monotonic(),
+    )
+
+
 def run_load(
     args: argparse.Namespace,
     config: CchSmokeConfig,
     writer: JsonlWriter,
     flow_fn: Callable[[CchSmokeConfig, int, str], dict[str, Any]],
 ) -> dict[str, Any]:
+    if getattr(args, "mode", MODE_FIXED_TPS) == MODE_SEQUENTIAL:
+        return run_sequential_load(args, config, writer, flow_fn)
+
     state = RunState()
     limiter = threading.BoundedSemaphore(args.max_inflight)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -447,10 +577,11 @@ def run_load(
     log_preflight(config, args.flow, args.amount_sats, target_count)
 
     LOG.info(
-        "START run_id=%s flow=%s target_tps=%.3f duration_seconds=%.3f "
+        "START run_id=%s flow=%s mode=%s target_tps=%.3f duration_seconds=%.3f "
         "target_transactions=%d max_inflight=%d",
         run_id,
         args.flow,
+        MODE_FIXED_TPS,
         args.tps,
         args.duration,
         target_count,
@@ -569,37 +700,31 @@ def run_load(
         LOG.info("DRAIN waiting_for=%d", len(futures))
         wait(futures)
 
-    finished_at = time.monotonic()
-    summary = build_summary(
-        args, run_id, state, load_started_at, load_finished_at, finished_at
+    return finish_load(
+        args,
+        run_id,
+        state,
+        writer,
+        load_started_at,
+        load_finished_at,
+        time.monotonic(),
     )
-    writer.write(summary)
-    LOG.info(
-        "RESULT %s succeeded=%d/%d failed=%d rejected=%d failure_rate=%.3f%% "
-        "success_tps=%.2f success_p50=%s success_p95=%s wall=%.1fs errors=%s",
-        "PASS" if summary["passed"] else "FAIL",
-        summary["succeeded"],
-        summary["scheduled"],
-        summary["failed"],
-        summary["rejected"],
-        summary["failure_rate"] * 100,
-        summary["successful_completion_tps_wall"],
-        seconds(summary["latency_ms"]["p50"]),
-        seconds(summary["latency_ms"]["p95"]),
-        summary["wall_duration_seconds"],
-        summary["errors"] or "none",
-    )
-    return summary
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run one complete CCH flow at a fixed transaction arrival rate."
+        description="Run complete CCH flows at a fixed rate or one at a time."
     )
     parser.add_argument(
         "--flow",
         required=True,
         choices=[FLOW_FIBER_TO_LND, FLOW_LND_TO_FIBER],
+    )
+    parser.add_argument(
+        "--mode",
+        choices=[MODE_FIXED_TPS, MODE_SEQUENTIAL],
+        default=MODE_FIXED_TPS,
+        help="fixed arrival rate, or one flow at a time",
     )
     parser.add_argument("--tps", type=float, default=5.0)
     parser.add_argument("--duration", type=float, default=300.0, help="seconds")
@@ -610,10 +735,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("reports/stability"))
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
-    if args.tps <= 0 or args.duration <= 0:
-        parser.error("--tps and --duration must be greater than zero")
-    if args.max_inflight <= 0 or args.progress_interval <= 0:
-        parser.error("--max-inflight and --progress-interval must be greater than zero")
+    if args.duration <= 0:
+        parser.error("--duration must be greater than zero")
+    if args.mode == MODE_FIXED_TPS and args.tps <= 0:
+        parser.error("--tps must be greater than zero in fixed-tps mode")
+    if args.progress_interval <= 0:
+        parser.error("--progress-interval must be greater than zero")
+    if args.mode == MODE_FIXED_TPS and args.max_inflight <= 0:
+        parser.error("--max-inflight must be greater than zero in fixed-tps mode")
     if not 0 <= args.max_failure_rate <= 1:
         parser.error("--max-failure-rate must be between 0 and 1")
     if args.amount_sats is not None and args.amount_sats <= 0:
@@ -652,7 +781,8 @@ def main(argv: list[str] | None = None) -> int:
         summary = {
             "type": "summary",
             "flow": args.flow,
-            "target_tps": args.tps,
+            "load_mode": args.mode,
+            "target_tps": args.tps if args.mode == MODE_FIXED_TPS else None,
             "configured_duration_seconds": args.duration,
             "passed": False,
             "error_type": type(exc).__name__,
