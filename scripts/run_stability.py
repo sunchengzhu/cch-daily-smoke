@@ -50,6 +50,7 @@ FLOW_FIBER_TO_LND = "fiber-to-lnd"
 FLOW_LND_TO_FIBER = "lnd-to-fiber"
 MODE_FIXED_TPS = "fixed-tps"
 MODE_SEQUENTIAL = "sequential"
+StageCallback = Callable[[str, str, dict[str, Any]], None]
 
 
 def utc_now() -> str:
@@ -103,6 +104,27 @@ def percentile(values: list[float], percent: float) -> float | None:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
+def run_flow_stage(
+    callback: StageCallback | None,
+    stage: str,
+    action: Callable[[], Any],
+    details: Callable[[Any], dict[str, Any]] | None = None,
+) -> Any:
+    """Run one flow stage and optionally report its lifecycle."""
+
+    if callback:
+        callback(stage, "START", {})
+    try:
+        result = action()
+    except BaseException as exc:
+        if callback:
+            callback(stage, "FAIL", {"error_type": type(exc).__name__})
+        raise
+    if callback:
+        callback(stage, "PASS", details(result) if details else {})
+    return result
+
+
 class JsonlWriter:
     def __init__(self, path: Path):
         self.path = path
@@ -147,20 +169,32 @@ class RunState:
 
 
 def run_flow_fiber_to_lnd(
-    config: CchSmokeConfig, amount_sats: int, transaction_name: str
+    config: CchSmokeConfig,
+    amount_sats: int,
+    transaction_name: str,
+    stage_callback: StageCallback | None = None,
 ) -> dict[str, Any]:
-    invoice = add_lnd_invoice(config, "lnd-b", amount_sats, transaction_name)
-    order = fnn(
-        config,
-        config.f1_rpc,
-        [
-            "cch",
-            "send_btc",
-            "--btc-pay-req",
-            invoice["payment_request"],
-            "--currency",
-            config.currency,
-        ],
+    invoice = run_flow_stage(
+        stage_callback,
+        "create_lnd_invoice",
+        lambda: add_lnd_invoice(config, "lnd-b", amount_sats, transaction_name),
+    )
+    order = run_flow_stage(
+        stage_callback,
+        "create_cch_order",
+        lambda: fnn(
+            config,
+            config.f1_rpc,
+            [
+                "cch",
+                "send_btc",
+                "--btc-pay-req",
+                invoice["payment_request"],
+                "--currency",
+                config.currency,
+            ],
+        ),
+        lambda value: {"payment_hash": value.get("payment_hash")},
     )
     if not same_script(order["wrapped_btc_type_script"], config.udt_script):
         raise AssertionError("send_btc returned an unexpected wrapped BTC type script")
@@ -173,17 +207,40 @@ def run_flow_fiber_to_lnd(
             f"unexpected Fiber amount: {fiber_amount}; expected {amount_sats + fee_sats}"
         )
 
-    payment = fnn(
-        config,
-        config.f2_rpc,
-        ["payment", "send_payment", "--invoice", order["incoming_invoice"]["Fiber"]],
+    payment = run_flow_stage(
+        stage_callback,
+        "send_fiber_payment",
+        lambda: fnn(
+            config,
+            config.f2_rpc,
+            [
+                "payment",
+                "send_payment",
+                "--invoice",
+                order["incoming_invoice"]["Fiber"],
+            ],
+        ),
     )
     if payment["payment_hash"] != payment_hash:
         raise AssertionError("send_payment returned a different payment hash")
 
-    wait_fiber_payment_status(config, payment_hash, "Success")
-    wait_cch_order_status(config, payment_hash, "Success")
-    wait_lnd_invoice_settled(config, "lnd-b", payment_hash, amount_sats)
+    run_flow_stage(
+        stage_callback,
+        "wait_fiber_payment",
+        lambda: wait_fiber_payment_status(config, payment_hash, "Success"),
+    )
+    run_flow_stage(
+        stage_callback,
+        "wait_cch_order",
+        lambda: wait_cch_order_status(config, payment_hash, "Success"),
+    )
+    run_flow_stage(
+        stage_callback,
+        "wait_lnd_invoice",
+        lambda: wait_lnd_invoice_settled(
+            config, "lnd-b", payment_hash, amount_sats
+        ),
+    )
     return {
         "payment_hash": payment_hash,
         "fee_sats": fee_sats,
@@ -193,14 +250,26 @@ def run_flow_fiber_to_lnd(
 
 
 def run_flow_lnd_to_fiber(
-    config: CchSmokeConfig, amount_sats: int, transaction_name: str
+    config: CchSmokeConfig,
+    amount_sats: int,
+    transaction_name: str,
+    stage_callback: StageCallback | None = None,
 ) -> dict[str, Any]:
     del transaction_name
-    fiber_invoice, payment_hash = create_fiber_invoice(config, amount_sats)
-    order = fnn(
-        config,
-        config.f1_rpc,
-        ["cch", "receive_btc", "--fiber-pay-req", fiber_invoice],
+    fiber_invoice, payment_hash = run_flow_stage(
+        stage_callback,
+        "create_fiber_invoice",
+        lambda: create_fiber_invoice(config, amount_sats),
+        lambda value: {"payment_hash": value[1]},
+    )
+    order = run_flow_stage(
+        stage_callback,
+        "create_cch_order",
+        lambda: fnn(
+            config,
+            config.f1_rpc,
+            ["cch", "receive_btc", "--fiber-pay-req", fiber_invoice],
+        ),
     )
     if order["payment_hash"] != payment_hash:
         raise AssertionError("receive_btc returned a different payment hash")
@@ -216,17 +285,43 @@ def run_flow_lnd_to_fiber(
     lightning_amount = fiber_amount + fee_sats
 
     try:
-        pay_lnd_invoice(
-            config,
-            "lnd-b",
-            order["incoming_invoice"]["Lightning"],
-            timeout=config.command_timeout,
+        run_flow_stage(
+            stage_callback,
+            "pay_lnd_invoice",
+            lambda: pay_lnd_invoice(
+                config,
+                "lnd-b",
+                order["incoming_invoice"]["Lightning"],
+                timeout=config.command_timeout,
+            ),
         )
-        wait_cch_order_status(config, payment_hash, "Success")
-        wait_fiber_invoice_status(config, payment_hash, "Paid")
-        wait_lnd_invoice_settled(config, "lnd-a", payment_hash, lightning_amount)
+        run_flow_stage(
+            stage_callback,
+            "wait_cch_order",
+            lambda: wait_cch_order_status(config, payment_hash, "Success"),
+        )
+        run_flow_stage(
+            stage_callback,
+            "wait_fiber_invoice",
+            lambda: wait_fiber_invoice_status(config, payment_hash, "Paid"),
+        )
+        run_flow_stage(
+            stage_callback,
+            "wait_lnd_invoice",
+            lambda: wait_lnd_invoice_settled(
+                config, "lnd-a", payment_hash, lightning_amount
+            ),
+        )
     except BaseException:
-        cleanup_lnd_to_fiber_invoice(config, payment_hash)
+        if stage_callback:
+            stage_callback("cleanup_lnd_invoice", "START", {})
+        cleanup = cleanup_lnd_to_fiber_invoice(config, payment_hash)
+        if stage_callback:
+            stage_callback(
+                "cleanup_lnd_invoice",
+                cleanup.get("result", "FAIL"),
+                cleanup,
+            )
         raise
     return {
         "payment_hash": payment_hash,
@@ -236,20 +331,23 @@ def run_flow_lnd_to_fiber(
     }
 
 
-def cleanup_lnd_to_fiber_invoice(config: CchSmokeConfig, payment_hash: str) -> None:
+def cleanup_lnd_to_fiber_invoice(
+    config: CchSmokeConfig, payment_hash: str
+) -> dict[str, Any]:
     """Cancel this failed flow's hold invoice so it cannot block later runs."""
     payment_hash_hex = payment_hash.removeprefix("0x")
     try:
         invoice = lncli_json(config, "lnd-a", ["lookupinvoice", payment_hash_hex])
         state = invoice.get("state")
         if state not in {"OPEN", "ACCEPTED"}:
-            return
+            return {"action": "none", "previous_state": state, "result": "PASS"}
         lncli_raw(config, "lnd-a", ["cancelinvoice", payment_hash_hex])
         LOG.debug(
             "CLEANUP canceled failed lnd-to-fiber hold invoice hash=%s previous_state=%s",
             payment_hash,
             state,
         )
+        return {"action": "cancel", "previous_state": state, "result": "PASS"}
     except BaseException as cleanup_error:
         LOG.warning(
             "CLEANUP failed hash=%s %s: %s",
@@ -257,6 +355,12 @@ def cleanup_lnd_to_fiber_invoice(config: CchSmokeConfig, payment_hash: str) -> N
             type(cleanup_error).__name__,
             compact_error(cleanup_error),
         )
+        return {
+            "action": "cancel",
+            "result": "FAIL",
+            "error_type": type(cleanup_error).__name__,
+            "error": compact_error(cleanup_error),
+        }
 
 
 def log_preflight(

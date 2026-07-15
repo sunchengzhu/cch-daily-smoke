@@ -74,9 +74,14 @@ def test_cleanup_cancels_open_lnd_hold_invoice(monkeypatch):
         lambda _config, node, args: calls.append((node, args)),
     )
 
-    cleanup_lnd_to_fiber_invoice(object(), "0xabc")
+    result = cleanup_lnd_to_fiber_invoice(object(), "0xabc")
 
     assert calls == [("lnd-a", ["cancelinvoice", "abc"])]
+    assert result == {
+        "action": "cancel",
+        "previous_state": "ACCEPTED",
+        "result": "PASS",
+    }
 
 
 def test_cleanup_leaves_settled_lnd_invoice_unchanged(monkeypatch):
@@ -89,7 +94,9 @@ def test_cleanup_leaves_settled_lnd_invoice_unchanged(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("settled invoice must not be canceled"),
     )
 
-    cleanup_lnd_to_fiber_invoice(object(), "0xabc")
+    result = cleanup_lnd_to_fiber_invoice(object(), "0xabc")
+
+    assert result == {"action": "none", "previous_state": "SETTLED", "result": "PASS"}
 
 
 def test_lnd_to_fiber_failure_cleans_up_hold_invoice(monkeypatch):
@@ -120,13 +127,30 @@ def test_lnd_to_fiber_failure_cleans_up_hold_invoice(monkeypatch):
     cleaned = []
     monkeypatch.setattr(
         "scripts.run_stability.cleanup_lnd_to_fiber_invoice",
-        lambda _config, payment_hash: cleaned.append(payment_hash),
+        lambda _config, payment_hash: (
+            cleaned.append(payment_hash)
+            or {"action": "cancel", "previous_state": "ACCEPTED", "result": "PASS"}
+        ),
     )
+    stages = []
 
     with pytest.raises(subprocess.TimeoutExpired):
-        run_flow_lnd_to_fiber(config, 100, "tx")
+        run_flow_lnd_to_fiber(
+            config,
+            100,
+            "tx",
+            stage_callback=lambda stage, status, details: stages.append(
+                (stage, status, details)
+            ),
+        )
 
     assert cleaned == ["0xabc"]
+    assert ("pay_lnd_invoice", "FAIL", {"error_type": "TimeoutExpired"}) in stages
+    assert (
+        "cleanup_lnd_invoice",
+        "PASS",
+        {"action": "cancel", "previous_state": "ACCEPTED", "result": "PASS"},
+    ) in stages
 
 
 def test_lnd_to_fiber_preflight_rejects_stale_pending_htlcs(monkeypatch):
