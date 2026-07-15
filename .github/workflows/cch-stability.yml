@@ -70,6 +70,7 @@ jobs:
       CCH_SMOKE_LND_B_CONTAINER: lnd-b
       CCH_SMOKE_LND_DIR: /data/.lnd
       CCH_SMOKE_LND_NETWORK: testnet4
+      CCH_SMOKE_COMMAND_TIMEOUT: "90"
       CCH_SMOKE_FNN_AUTH_TOKEN: ${{ secrets.CCH_SMOKE_FNN_AUTH_TOKEN }}
 
     steps:
