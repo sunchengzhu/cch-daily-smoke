@@ -3,12 +3,17 @@ import logging
 import subprocess
 import time
 
+import pytest
+
 from scripts.run_stability import (
     JsonlWriter,
     RunState,
     build_summary,
     compact_error,
+    cleanup_lnd_to_fiber_invoice,
+    log_preflight,
     percentile,
+    run_flow_lnd_to_fiber,
     run_load,
     seconds,
 )
@@ -55,6 +60,90 @@ def test_compact_error_redacts_invoice_from_timeout():
 def test_seconds_formats_milliseconds_for_console():
     assert seconds(None) == "n/a"
     assert seconds(2489.4) == "2.49s"
+
+
+def test_cleanup_cancels_open_lnd_hold_invoice(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "scripts.run_stability.lncli_json",
+        lambda *_args, **_kwargs: {"state": "ACCEPTED"},
+    )
+    monkeypatch.setattr(
+        "scripts.run_stability.lncli_raw",
+        lambda _config, node, args: calls.append((node, args)),
+    )
+
+    cleanup_lnd_to_fiber_invoice(object(), "0xabc")
+
+    assert calls == [("lnd-a", ["cancelinvoice", "abc"])]
+
+
+def test_cleanup_leaves_settled_lnd_invoice_unchanged(monkeypatch):
+    monkeypatch.setattr(
+        "scripts.run_stability.lncli_json",
+        lambda *_args, **_kwargs: {"state": "SETTLED"},
+    )
+    monkeypatch.setattr(
+        "scripts.run_stability.lncli_raw",
+        lambda *_args, **_kwargs: pytest.fail("settled invoice must not be canceled"),
+    )
+
+    cleanup_lnd_to_fiber_invoice(object(), "0xabc")
+
+
+def test_lnd_to_fiber_failure_cleans_up_hold_invoice(monkeypatch):
+    config = argparse.Namespace(
+        f1_rpc="f1",
+        command_timeout=60,
+        udt_script={"code_hash": "code", "hash_type": "type", "args": "args"},
+    )
+    monkeypatch.setattr(
+        "scripts.run_stability.create_fiber_invoice", lambda *_args: ("fiber", "0xabc")
+    )
+    monkeypatch.setattr(
+        "scripts.run_stability.fnn",
+        lambda *_args: {
+            "payment_hash": "0xabc",
+            "wrapped_btc_type_script": config.udt_script,
+            "fee_sats": "0xa",
+            "amount_sats": "0x64",
+            "incoming_invoice": {"Lightning": "lntb-invoice"},
+        },
+    )
+    monkeypatch.setattr(
+        "scripts.run_stability.pay_lnd_invoice",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(["lncli", "payinvoice"], 60)
+        ),
+    )
+    cleaned = []
+    monkeypatch.setattr(
+        "scripts.run_stability.cleanup_lnd_to_fiber_invoice",
+        lambda _config, payment_hash: cleaned.append(payment_hash),
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_flow_lnd_to_fiber(config, 100, "tx")
+
+    assert cleaned == ["0xabc"]
+
+
+def test_lnd_to_fiber_preflight_rejects_stale_pending_htlcs(monkeypatch):
+    monkeypatch.setattr(
+        "scripts.run_stability.get_fiber_channel",
+        lambda _config: {"local_balance": "0x1000", "remote_balance": "0x1000"},
+    )
+    monkeypatch.setattr(
+        "scripts.run_stability.lnd_channel_balances_from_a",
+        lambda _config: {"lnd_a": 4096, "lnd_b": 4096},
+    )
+    monkeypatch.setattr(
+        "scripts.run_stability.lnd_b_liquidity",
+        lambda _config: {"spendable_sats": 4096, "pending_htlcs_count": 3},
+    )
+
+    with pytest.raises(RuntimeError, match="3 pending HTLC"):
+        log_preflight(object(), "lnd-to-fiber", 100, 1)
 
 
 def test_summary_counts_rejections_as_failures():
@@ -138,6 +227,7 @@ def test_load_runner_logs_compact_progress_and_result(monkeypatch, tmp_path, cap
 
     messages = [record.message for record in caplog.records]
     assert any(message.startswith("PROGRESS ") for message in messages)
+    assert any("success_tps=" in message and "success_p95=" in message for message in messages)
     assert any(message.startswith("RESULT PASS ") for message in messages)
     assert not any(message.startswith("SUMMARY {") for message in messages)
 

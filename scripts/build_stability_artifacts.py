@@ -165,10 +165,10 @@ def summary_markdown(summary: dict[str, Any]) -> str:
             "Successful completion TPS",
             summary.get("successful_completion_tps_wall"),
         ),
-        ("Latency p50 (ms)", latency.get("p50")),
-        ("Latency p95 (ms)", latency.get("p95")),
-        ("Latency p99 (ms)", latency.get("p99")),
-        ("Latency max (ms)", latency.get("max")),
+        ("Successful flow latency p50 (ms)", latency.get("p50")),
+        ("Successful flow latency p95 (ms)", latency.get("p95")),
+        ("Successful flow latency p99 (ms)", latency.get("p99")),
+        ("Successful flow latency max (ms)", latency.get("max")),
     ]
     lines = ["## CCH stability report", "", "| Metric | Value |", "| --- | ---: |"]
     lines.extend(f"| {label} | {format_value(value)} |" for label, value in rows)

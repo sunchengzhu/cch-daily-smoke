@@ -34,6 +34,8 @@ from test_cch_daily_smoke import (  # noqa: E402
     hex_to_int,
     lnd_b_liquidity,
     lnd_channel_balances_from_a,
+    lncli_json,
+    lncli_raw,
     pay_lnd_invoice,
     same_script,
     wait_cch_order_status,
@@ -211,16 +213,48 @@ def run_flow_lnd_to_fiber(
         )
     lightning_amount = fiber_amount + fee_sats
 
-    pay_lnd_invoice(config, "lnd-b", order["incoming_invoice"]["Lightning"])
-    wait_cch_order_status(config, payment_hash, "Success")
-    wait_fiber_invoice_status(config, payment_hash, "Paid")
-    wait_lnd_invoice_settled(config, "lnd-a", payment_hash, lightning_amount)
+    try:
+        pay_lnd_invoice(
+            config,
+            "lnd-b",
+            order["incoming_invoice"]["Lightning"],
+            timeout=config.command_timeout,
+        )
+        wait_cch_order_status(config, payment_hash, "Success")
+        wait_fiber_invoice_status(config, payment_hash, "Paid")
+        wait_lnd_invoice_settled(config, "lnd-a", payment_hash, lightning_amount)
+    except BaseException:
+        cleanup_lnd_to_fiber_invoice(config, payment_hash)
+        raise
     return {
         "payment_hash": payment_hash,
         "fee_sats": fee_sats,
         "source_amount": lightning_amount,
         "destination_amount": fiber_amount,
     }
+
+
+def cleanup_lnd_to_fiber_invoice(config: CchSmokeConfig, payment_hash: str) -> None:
+    """Cancel this failed flow's hold invoice so it cannot block later runs."""
+    payment_hash_hex = payment_hash.removeprefix("0x")
+    try:
+        invoice = lncli_json(config, "lnd-a", ["lookupinvoice", payment_hash_hex])
+        state = invoice.get("state")
+        if state not in {"OPEN", "ACCEPTED"}:
+            return
+        lncli_raw(config, "lnd-a", ["cancelinvoice", payment_hash_hex])
+        LOG.debug(
+            "CLEANUP canceled failed lnd-to-fiber hold invoice hash=%s previous_state=%s",
+            payment_hash,
+            state,
+        )
+    except BaseException as cleanup_error:
+        LOG.warning(
+            "CLEANUP failed hash=%s %s: %s",
+            payment_hash,
+            type(cleanup_error).__name__,
+            compact_error(cleanup_error),
+        )
 
 
 def log_preflight(
@@ -235,7 +269,16 @@ def log_preflight(
     if flow == FLOW_FIBER_TO_LND and fiber2_balance < amount_sats:
         raise RuntimeError("fiber2 does not have enough balance for even one transaction")
     if flow == FLOW_LND_TO_FIBER:
-        spendable = lnd_b_liquidity(config)["spendable_sats"]
+        lnd_b = lnd_b_liquidity(config)
+        spendable = lnd_b["spendable_sats"]
+        pending_htlcs = lnd_b.get("pending_htlcs_count", 0)
+        if pending_htlcs:
+            raise RuntimeError(
+                "lnd-to-fiber preflight found "
+                f"{pending_htlcs} pending HTLC(s) on the selected LND channel; "
+                "a previous run may have left unresolved hold invoices. "
+                "Cancel or settle them before starting a new stability run"
+            )
         if spendable < amount_sats:
             raise RuntimeError("lnd-b does not have enough spendable balance for one transaction")
 
@@ -505,7 +548,7 @@ def run_load(
                 )
                 LOG.info(
                     "PROGRESS %ds sent=%d/%d done=%d active=%d failed=%d "
-                    "rejected=%d saturated=%s tps=%.2f p95=%s",
+                    "rejected=%d saturated=%s success_tps=%.2f success_p95=%s",
                     round(elapsed),
                     snapshot["scheduled"],
                     target_count,
@@ -533,7 +576,7 @@ def run_load(
     writer.write(summary)
     LOG.info(
         "RESULT %s succeeded=%d/%d failed=%d rejected=%d failure_rate=%.3f%% "
-        "tps=%.2f p50=%s p95=%s wall=%.1fs errors=%s",
+        "success_tps=%.2f success_p50=%s success_p95=%s wall=%.1fs errors=%s",
         "PASS" if summary["passed"] else "FAIL",
         summary["succeeded"],
         summary["scheduled"],

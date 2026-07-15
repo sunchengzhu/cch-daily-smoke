@@ -35,6 +35,9 @@ def test_interrupted_run_builds_partial_readable_reports(tmp_path):
     assert summary["succeeded"] == 2
     assert summary["latency_ms"]["p50"] == 2000
     assert "partial report" in paths["summary_md"].read_text(encoding="utf-8")
+    assert "Successful flow latency p95 (ms)" in paths["summary_md"].read_text(
+        encoding="utf-8"
+    )
     assert "| Failure rate | 0.000% |" in paths["summary_md"].read_text(
         encoding="utf-8"
     )

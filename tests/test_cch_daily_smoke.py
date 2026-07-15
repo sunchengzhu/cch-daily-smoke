@@ -297,6 +297,7 @@ def lnd_b_liquidity(config):
         "local_balance": local_balance,
         "reserve_sats": reserve,
         "spendable_sats": max(0, local_balance - reserve),
+        "pending_htlcs_count": len(channel.get("pending_htlcs") or []),
     }
 
 
@@ -308,12 +309,12 @@ def add_lnd_invoice(config, node_name, amount_sats, memo):
     )
 
 
-def pay_lnd_invoice(config, node_name, pay_req):
+def pay_lnd_invoice(config, node_name, pay_req, timeout=None):
     return lncli_raw(
         config,
         node_name,
         ["payinvoice", pay_req, "--force"],
-        timeout=max(config.command_timeout, 120),
+        timeout=timeout or max(config.command_timeout, 120),
     )
 
 
