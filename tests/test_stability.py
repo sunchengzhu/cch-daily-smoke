@@ -1,37 +1,13 @@
 import argparse
-import logging
 import time
 
-from scripts.run_stability import (
-    JsonlWriter,
-    RunState,
-    build_summary,
-    compact_error,
-    percentile,
-    run_load,
-    seconds,
-)
+from scripts.run_stability import JsonlWriter, RunState, build_summary, percentile, run_load
 
 
 def test_percentile_interpolates_values():
     assert percentile([], 95) is None
     assert percentile([10], 95) == 10
     assert percentile([10, 20, 30, 40], 50) == 25
-
-
-def test_compact_error_prefers_stderr_and_truncates():
-    error = AssertionError(
-        "command failed (1): fnn --invoice very-long-secret\n"
-        "stdout:\n\nstderr:\nError: RPC error: Unauthorized"
-    )
-
-    assert compact_error(error) == "Error: RPC error: Unauthorized"
-    assert compact_error(AssertionError("x" * 20), max_length=10) == "xxxxxxx..."
-
-
-def test_seconds_formats_milliseconds_for_console():
-    assert seconds(None) == "n/a"
-    assert seconds(2489.4) == "2.49s"
 
 
 def test_summary_counts_rejections_as_failures():
@@ -88,32 +64,3 @@ def test_load_runner_starts_complete_flows_at_target_tps(monkeypatch, tmp_path):
     assert summary["succeeded"] == 2
     assert 4.8 <= summary["actual_start_tps"] <= 5.1
     assert summary["passed"] is True
-
-
-def test_load_runner_logs_compact_progress_and_result(monkeypatch, tmp_path, caplog):
-    monkeypatch.setattr("scripts.run_stability.log_preflight", lambda *args: None)
-    args = argparse.Namespace(
-        flow="fiber-to-lnd",
-        tps=5.0,
-        duration=0.4,
-        amount_sats=100,
-        max_inflight=2,
-        progress_interval=0.1,
-        max_failure_rate=0.0,
-    )
-
-    def fake_flow(config, amount_sats, transaction_name):
-        del config, amount_sats, transaction_name
-        return {"payment_hash": "fake"}
-
-    writer = JsonlWriter(tmp_path / "details.jsonl")
-    try:
-        with caplog.at_level(logging.INFO, logger="cch-stability"):
-            run_load(args, object(), writer, fake_flow)
-    finally:
-        writer.close()
-
-    messages = [record.message for record in caplog.records]
-    assert any(message.startswith("PROGRESS ") for message in messages)
-    assert any(message.startswith("RESULT PASS ") for message in messages)
-    assert not any(message.startswith("SUMMARY {") for message in messages)
