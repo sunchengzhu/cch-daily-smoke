@@ -94,6 +94,13 @@ jobs:
             exit 1
           fi
 
+      - name: Run end-to-end readiness probe
+        run: |
+          python scripts/check_stability_readiness.py \
+            --flow "${{ inputs.flow }}" \
+            --amount-sats 100 \
+            --timeout 60
+
       - name: Run stability test
         run: |
           python scripts/run_stability.py \
