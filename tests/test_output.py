@@ -82,7 +82,7 @@ def test_asset_convention_is_printed_once(capsys):
     print_asset_convention()
 
     output = capsys.readouterr().out
-    assert output.strip() == "资产换算（CCH Demo）：1 BTC = 1 mzBTC"
+    assert output.strip() == "Asset convention (CCH Demo): 1 BTC = 1 mzBTC"
 
 
 def test_balance_failure_includes_channel_details():

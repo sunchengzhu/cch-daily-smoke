@@ -435,7 +435,7 @@ def format_mzbtc(amount):
 
 
 def print_asset_convention():
-    print("\n资产换算（CCH Demo）：1 BTC = 1 mzBTC")
+    print("\nAsset convention (CCH Demo): 1 BTC = 1 mzBTC")
 
 
 def print_balance_table(title, unit, rows):
