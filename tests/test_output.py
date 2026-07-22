@@ -5,7 +5,7 @@ import pytest
 from test_cch_daily_smoke import (
     active_lnd_channel,
     assert_balance_delta,
-    format_mzbtc,
+    format_cwbtc,
     print_asset_convention,
     print_flow_summary,
     run_cmd,
@@ -18,7 +18,7 @@ def test_flow_summary_prints_before_after_and_change(capsys):
         payment_hash="0x1234",
         principal_sats=100,
         cch_fee_sats=10,
-        source_paid=format_mzbtc(110),
+        source_paid=format_cwbtc(110),
         destination_received="100 sats",
         fiber_channel_id="0xfiber",
         fiber_before={"fiber2": 1000, "fiber1_cch": 0},
@@ -34,8 +34,8 @@ def test_flow_summary_prints_before_after_and_change(capsys):
 
     output = capsys.readouterr().out
     assert "FLOW 1: fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b" in output
-    assert "Principal            : 100 sats ↔ 100 mzBTC units" in output
-    assert "Source paid          : 110 mzBTC units" in output
+    assert "Principal            : 100 sats ↔ 100 cWBTC units" in output
+    assert "Source paid          : 110 cWBTC units" in output
     assert "Destination received : 100 sats" in output
     assert "fiber2" in output and "-110" in output
     assert "fiber1/CCH" in output and "+110" in output
@@ -53,7 +53,7 @@ def test_flow_summary_prints_channel_details_in_debug_mode(capsys):
         principal_sats=100,
         cch_fee_sats=10,
         source_paid="110 sats",
-        destination_received=format_mzbtc(100),
+        destination_received=format_cwbtc(100),
         fiber_channel_id="0xfiber",
         fiber_before={"fiber2": 1000, "fiber1_cch": 0},
         fiber_after={"fiber2": 900, "fiber1_cch": 100},
@@ -73,16 +73,16 @@ def test_flow_summary_prints_channel_details_in_debug_mode(capsys):
     assert "LND outpoint: tx:0" in output
 
 
-def test_format_mzbtc_uses_integer_units():
-    assert format_mzbtc(100) == "100 mzBTC units"
-    assert format_mzbtc(100_000_000) == "100,000,000 mzBTC units"
+def test_format_cwbtc_uses_integer_units():
+    assert format_cwbtc(100) == "100 cWBTC units"
+    assert format_cwbtc(100_000_000) == "100,000,000 cWBTC units"
 
 
 def test_asset_convention_is_printed_once(capsys):
     print_asset_convention()
 
     output = capsys.readouterr().out
-    assert output.strip() == "Asset convention (CCH Demo): 1 BTC = 1 mzBTC"
+    assert output.strip() == "Asset convention (CCH Demo): 1 BTC = 1 cWBTC"
 
 
 def test_balance_failure_includes_channel_details():

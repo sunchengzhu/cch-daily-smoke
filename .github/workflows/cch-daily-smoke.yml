@@ -39,13 +39,17 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
+      - name: Run unit tests
+        run: python -m pytest -q --ignore=tests/test_cch_daily_smoke.py
+
       - name: Ensure LND outbound liquidity
         run: python scripts/ensure_lnd_liquidity.py
 
-      - name: Run CCH daily smoke
+      - name: Run live bidirectional CCH smoke
         run: |
           if [ -z "${CCH_SMOKE_FNN_AUTH_TOKEN:-}" ]; then
             echo "::error::Missing repository secret CCH_SMOKE_FNN_AUTH_TOKEN."
             exit 1
           fi
-          python -m pytest -vv -s
+          python -m pytest -vv -s \
+            tests/test_cch_daily_smoke.py::test_cch_daily_smoke_bidirectional

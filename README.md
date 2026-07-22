@@ -2,7 +2,7 @@
 
 独立 smoke 项目，用于每日验证已部署 testnet 环境里的两条 CCH 主流程。
 
-> 本 Demo 按 `1 BTC = 1 mzBTC` 计价。
+> 本 Demo 按 `1 BTC = 1 cWBTC` 计价。
 
 - `fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b`
 - `lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2`
@@ -21,20 +21,20 @@
 ## 前置条件
 
 - `fiber1/CCH` 已配置 CCH，并连接 `lnd-a`。
-- `fiber2` 和 `fiber1/CCH` 之间已有 ready 的 mzBTC channel。
+- `fiber2` 和 `fiber1/CCH` 之间已有 ready 的 cWBTC channel。
 - `lnd-a` 和 `lnd-b` 之间已有 active channel。
-- 两个 Fiber 节点都 whitelist mzBTC，且 CCH wrapped BTC 指向 mzBTC。
+- 两个 Fiber 节点都 whitelist cWBTC，且 CCH wrapped BTC 指向 cWBTC。
 
-mzBTC:
+cWBTC:
 
-- Explorer: https://testnet.explorer.nervos.org/xudt/0xb76a77e0807794af162716c450885092e29eaabce09be1cc30335ce9d906b590
+- Type hash: `0x569e6b14fa5f3aef02dd83ce4b10ce5b5d691e39244a5d3a0d2a1624e9a73a72`
 - Type script:
 
 ```json
 {
   "code_hash": "0x25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
   "hash_type": "type",
-  "args": "0x7275c8fb7feb81d22a47aa582c4f2487d771a1933957fe8fee9b363603487b1a00000000"
+  "args": "0x9a1086531ed6dc69e0bd44cef5278e03faf3015b31aff60b08fb87663ce8507100000000"
 }
 ```
 
@@ -55,7 +55,7 @@ CCH_SMOKE_LND_B_CONTAINER=lnd-b \
 python -m pytest -vv -s
 ```
 
-Daily smoke 固定使用 `100 sats ↔ 100 mzBTC units` 作为每条路径的本金，
+Daily smoke 固定使用 `100 sats ↔ 100 cWBTC units` 作为每条路径的本金，
 CCH fee 另计。稳定性测试仍可通过 `amount_sats` 单独设置每笔本金。
 
 也可以：
@@ -68,7 +68,7 @@ make smoke
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CCH_SMOKE_FIBER_CHANNEL_ID` | unset | 多条 mzBTC channel 时指定目标 channel |
+| `CCH_SMOKE_FIBER_CHANNEL_ID` | unset | 多条 cWBTC channel 时指定目标 channel |
 | `CCH_SMOKE_LND_CHANNEL_ID` | unset | 多条 LND channel 时指定目标 channel |
 | `CCH_SMOKE_LND_NETWORK` | `testnet4` | LND bitcoin network |
 | `CCH_SMOKE_LND_MIN_SPENDABLE_SATS` | `1000000` | 独立 CI 流动性步骤要求 `lnd-b` 至少保有的可支付余额 |

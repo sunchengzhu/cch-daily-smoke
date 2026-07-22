@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-MZBTC_SCRIPT = {
+CWBTC_SCRIPT = {
     "code_hash": "0x25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
     "hash_type": "type",
-    "args": "0x7275c8fb7feb81d22a47aa582c4f2487d771a1933957fe8fee9b363603487b1a00000000",
+    "args": "0x9a1086531ed6dc69e0bd44cef5278e03faf3015b31aff60b08fb87663ce8507100000000",
 }
 DAILY_SMOKE_AMOUNT_SATS = 100
 
@@ -51,7 +51,7 @@ class CchSmokeConfig:
             pytest.fail(f"fnn-cli not found: {fnn_cli}")
 
         udt_script = json.loads(
-            os.environ.get("CCH_SMOKE_UDT_SCRIPT_JSON", json.dumps(MZBTC_SCRIPT))
+            os.environ.get("CCH_SMOKE_UDT_SCRIPT_JSON", json.dumps(CWBTC_SCRIPT))
         )
         return cls(
             fnn_cli=fnn_cli,
@@ -405,7 +405,7 @@ def get_fiber_channel(config, minimum_f2_local=0, channel_id=None):
             for channel in channels
         ]
         pytest.fail(
-            "no ready mzBTC Fiber channel from fiber2 to fiber1/CCH; "
+            "no ready cWBTC Fiber channel from fiber2 to fiber1/CCH; "
             f"available channels: {json.dumps(available, sort_keys=True)}"
         )
     return candidates[0]
@@ -430,12 +430,12 @@ def assert_balance_delta(label, before, after, expected_delta, details=None):
     assert actual_delta == expected_delta, message
 
 
-def format_mzbtc(amount):
-    return f"{amount:,} mzBTC units"
+def format_cwbtc(amount):
+    return f"{amount:,} cWBTC units"
 
 
 def print_asset_convention():
-    print("\nAsset convention (CCH Demo): 1 BTC = 1 mzBTC")
+    print("\nAsset convention (CCH Demo): 1 BTC = 1 cWBTC")
 
 
 def print_balance_table(title, unit, rows):
@@ -470,7 +470,7 @@ def print_flow_summary(
     print(f"Payment hash         : {payment_hash}")
     print(
         f"Principal            : {principal_sats:,} sats ↔ "
-        f"{format_mzbtc(principal_sats)}"
+        f"{format_cwbtc(principal_sats)}"
     )
     print(f"CCH fee              : {cch_fee_sats:,} sats")
     print(f"Source paid          : {source_paid}")
@@ -479,7 +479,7 @@ def print_flow_summary(
         print(f"\nFiber channel: {fiber_channel_id}")
     print_balance_table(
         "Fiber balances",
-        "mzBTC units",
+        "cWBTC units",
         [
             ("fiber2", fiber_before["fiber2"], fiber_after["fiber2"]),
             (
@@ -613,7 +613,7 @@ def test_cch_daily_smoke_bidirectional():
         payment_hash=send_payment_hash,
         principal_sats=amount_sats,
         cch_fee_sats=send_fee_sats,
-        source_paid=format_mzbtc(send_fiber_amount),
+        source_paid=format_cwbtc(send_fiber_amount),
         destination_received=f"{amount_sats:,} sats",
         fiber_channel_id=fiber_channel_id,
         fiber_before=fiber_before,
@@ -686,7 +686,7 @@ def test_cch_daily_smoke_bidirectional():
         principal_sats=receive_fiber_amount,
         cch_fee_sats=receive_fee_sats,
         source_paid=f"{lightning_amount:,} sats",
-        destination_received=format_mzbtc(receive_fiber_amount),
+        destination_received=format_cwbtc(receive_fiber_amount),
         fiber_channel_id=fiber_channel_id,
         fiber_before=fiber_before,
         fiber_after=fiber_after,
