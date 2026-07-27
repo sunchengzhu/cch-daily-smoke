@@ -53,3 +53,20 @@ jobs:
           fi
           python -m pytest -vv -s \
             tests/test_cch_daily_smoke.py::test_cch_daily_smoke_bidirectional
+
+  notify-discord:
+    runs-on: ubuntu-22.04
+    needs: cch-daily-smoke
+    if: ${{ always() && needs.cch-daily-smoke.result == 'failure' }}
+
+    steps:
+      - name: Notify Discord on failure
+        continue-on-error: true
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          status: failure
+          title: "CCH Daily Smoke Failed"
+          description: "CCH daily smoke failed. Check run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}."
+          url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          color: 0xff0000
