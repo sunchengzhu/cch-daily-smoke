@@ -26,6 +26,9 @@ jobs:
       CCH_SMOKE_FNN_AUTH_TOKEN: ${{ secrets.CCH_SMOKE_FNN_AUTH_TOKEN }}
 
     steps:
+      - name: Simulate CI failure for Discord notification test
+        run: exit 1
+
       - uses: actions/checkout@v7
 
       - name: Update and verify Fiber nodes
