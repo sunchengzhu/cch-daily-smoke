@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: "0 2 * * *" # 10:00 Asia/Shanghai
   workflow_dispatch:
+    inputs:
+      fiber_source:
+        description: "Fiber package source"
+        required: false
+        default: release
+        type: choice
+        options:
+          - release
+          - develop
 
 permissions:
   contents: read
@@ -14,6 +23,7 @@ jobs:
     timeout-minutes: 30
     env:
       CCH_SMOKE_ENABLED: "1"
+      CCH_SMOKE_FNN_SOURCE: ${{ inputs.fiber_source || 'release' }}
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
       CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
       CCH_SMOKE_F2_RPC: http://127.0.0.1:8229

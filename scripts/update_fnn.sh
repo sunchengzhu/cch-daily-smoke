@@ -4,6 +4,8 @@ set -Eeuo pipefail
 
 REPOSITORY="${CCH_SMOKE_FNN_REPOSITORY:-nervosnetwork/fiber}"
 RELEASE_TAG="${CCH_SMOKE_FNN_RELEASE_TAG:-}"
+FNN_SOURCE="${CCH_SMOKE_FNN_SOURCE:-${CCH_SMOKE_FNN_VERSION:-release}}"
+DEVELOP_CONF_URL="${CCH_SMOKE_FNN_DEVELOP_CONF_URL:-https://github-test-logs.ckbapp.dev/fiber/fnn.conf}"
 NODE1_DIR="${CCH_SMOKE_NODE1_DIR:-/home/ckb/fiber-test/testnet/node1}"
 NODE2_DIR="${CCH_SMOKE_NODE2_DIR:-/home/ckb/fiber-test/testnet/node2}"
 SERVICE1="${CCH_SMOKE_FIBER_SERVICE1:-fiber-testnet1.service}"
@@ -28,6 +30,21 @@ require_command() {
     printf 'required command not found: %s\n' "$1" >&2
     exit 1
   }
+}
+
+read_fnn_conf_value() {
+  local key="$1"
+  local conf="$2"
+  awk -v key="$key" '
+    index($0, key "=") == 1 {
+      value = substr($0, length(key) + 2)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      if (value ~ /^".*"$/) {
+        value = substr(value, 2, length(value) - 2)
+      }
+      print value
+    }
+  ' "$conf" | tail -n 1
 }
 
 wait_for_service() {
@@ -84,7 +101,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-for command in curl jq tar sha256sum sudo systemctl install seq; do
+for command in awk curl jq tar sha256sum sudo systemctl install seq; do
   require_command "$command"
 done
 
@@ -103,27 +120,6 @@ sudo -n true
 sudo -n systemctl cat "$SERVICE1" >/dev/null
 sudo -n systemctl cat "$SERVICE2" >/dev/null
 
-if [[ -n "$RELEASE_TAG" ]]; then
-  log "resolving requested release $RELEASE_TAG"
-  RELEASE_JSON="$(
-    curl -fsSL --retry 3 \
-      "https://api.github.com/repos/$REPOSITORY/releases/tags/$RELEASE_TAG"
-  )"
-else
-  log "resolving latest published release, including prereleases"
-  RELEASE_JSON="$(
-    curl -fsSL --retry 3 \
-      "https://api.github.com/repos/$REPOSITORY/releases?per_page=30" \
-      | jq -c '[.[] | select(.draft | not)] | sort_by(.published_at) | last'
-  )"
-fi
-
-TARGET_TAG="$(jq -r '.tag_name // empty' <<<"$RELEASE_JSON")"
-[[ -n "$TARGET_TAG" ]] || {
-  printf 'unable to resolve a Fiber release\n' >&2
-  exit 1
-}
-
 case "$(uname -m)" in
   x86_64) ASSET_SUFFIX="x86_64-linux-portable.tar.gz" ;;
   aarch64 | arm64) ASSET_SUFFIX="aarch64-linux-portable.tar.gz" ;;
@@ -133,39 +129,121 @@ case "$(uname -m)" in
     ;;
 esac
 
-ASSET_JSON="$(
-  jq -c --arg suffix "$ASSET_SUFFIX" \
-    '.assets[] | select(.name | endswith($suffix))' <<<"$RELEASE_JSON"
-)"
-ASSET_NAME="$(jq -r '.name // empty' <<<"$ASSET_JSON")"
-ASSET_URL="$(jq -r '.browser_download_url // empty' <<<"$ASSET_JSON")"
-ASSET_DIGEST="$(jq -r '.digest // empty' <<<"$ASSET_JSON")"
+case "$FNN_SOURCE" in
+  latest | release)
+    FNN_SOURCE="release"
+    if [[ -n "$RELEASE_TAG" ]]; then
+      log "resolving requested release $RELEASE_TAG"
+      RELEASE_JSON="$(
+        curl -fsSL --retry 3 \
+          "https://api.github.com/repos/$REPOSITORY/releases/tags/$RELEASE_TAG"
+      )"
+    else
+      log "resolving latest published release, including prereleases"
+      RELEASE_JSON="$(
+        curl -fsSL --retry 3 \
+          "https://api.github.com/repos/$REPOSITORY/releases?per_page=30" \
+          | jq -c '[.[] | select(.draft | not)] | sort_by(.published_at) | last'
+      )"
+    fi
 
-[[ -n "$ASSET_NAME" && -n "$ASSET_URL" ]] || {
-  printf 'release %s has no %s asset\n' "$TARGET_TAG" "$ASSET_SUFFIX" >&2
-  exit 1
-}
-[[ "$ASSET_DIGEST" == sha256:* ]] || {
-  printf 'release asset %s has no SHA-256 digest\n' "$ASSET_NAME" >&2
-  exit 1
-}
+    TARGET_TAG="$(jq -r '.tag_name // empty' <<<"$RELEASE_JSON")"
+    [[ -n "$TARGET_TAG" ]] || {
+      printf 'unable to resolve a Fiber release\n' >&2
+      exit 1
+    }
+
+    ASSET_JSON="$(
+      jq -c --arg suffix "$ASSET_SUFFIX" \
+        '.assets[] | select(.name | endswith($suffix))' <<<"$RELEASE_JSON"
+    )"
+    ASSET_NAME="$(jq -r '.name // empty' <<<"$ASSET_JSON")"
+    ASSET_URL="$(jq -r '.browser_download_url // empty' <<<"$ASSET_JSON")"
+    ASSET_DIGEST="$(jq -r '.digest // empty' <<<"$ASSET_JSON")"
+
+    [[ -n "$ASSET_NAME" && -n "$ASSET_URL" ]] || {
+      printf 'release %s has no %s asset\n' "$TARGET_TAG" "$ASSET_SUFFIX" >&2
+      exit 1
+    }
+    [[ "$ASSET_DIGEST" == sha256:* ]] || {
+      printf 'release asset %s has no SHA-256 digest\n' "$ASSET_NAME" >&2
+      exit 1
+    }
+    TARGET_LABEL="release $TARGET_TAG"
+    ;;
+  develop)
+    [[ -z "$RELEASE_TAG" ]] || {
+      printf 'CCH_SMOKE_FNN_RELEASE_TAG cannot be used with develop\n' >&2
+      exit 1
+    }
+
+    log "resolving latest develop package from $DEVELOP_CONF_URL"
+    DEVELOP_CONF="$TMP_DIR/fnn.conf"
+    curl -fsSL --retry 3 -o "$DEVELOP_CONF" "$DEVELOP_CONF_URL"
+
+    DEVELOP_BASE_URL="$(read_fnn_conf_value FNN_BASE_URL "$DEVELOP_CONF")"
+    ASSET_NAME="$(read_fnn_conf_value TARBALL_develop "$DEVELOP_CONF")"
+    [[ -n "$DEVELOP_BASE_URL" && -n "$ASSET_NAME" ]] || {
+      printf 'fnn.conf has no FNN_BASE_URL or TARBALL_develop\n' >&2
+      exit 1
+    }
+
+    ESCAPED_ASSET_SUFFIX="${ASSET_SUFFIX//./\\.}"
+    DEVELOP_ASSET_PATTERN="^fnn_develop_[0-9]{8}_[0-9a-f]{7,40}-${ESCAPED_ASSET_SUFFIX}$"
+    [[ "$ASSET_NAME" =~ $DEVELOP_ASSET_PATTERN ]] || {
+      printf 'unexpected develop package for this architecture: %s\n' "$ASSET_NAME" >&2
+      exit 1
+    }
+
+    if [[ "$DEVELOP_BASE_URL" == http://* ]]; then
+      DEVELOP_BASE_URL="https://${DEVELOP_BASE_URL#http://}"
+    fi
+    ASSET_URL="${DEVELOP_BASE_URL%/}/$ASSET_NAME"
+    ASSET_DIGEST=""
+    TARGET_TAG="${ASSET_NAME%.tar.gz}"
+    TARGET_LABEL="develop package $ASSET_NAME"
+    ;;
+  *)
+    printf 'unsupported Fiber package source: %s (expected release or develop)\n' \
+      "$FNN_SOURCE" >&2
+    exit 1
+    ;;
+esac
 
 log "downloading $ASSET_NAME"
 curl -fL --retry 3 -o "$TMP_DIR/$ASSET_NAME" "$ASSET_URL"
 
-EXPECTED_SHA256="${ASSET_DIGEST#sha256:}"
 ACTUAL_SHA256="$(sha256sum "$TMP_DIR/$ASSET_NAME" | awk '{print $1}')"
-[[ "$ACTUAL_SHA256" == "$EXPECTED_SHA256" ]] || {
-  printf 'SHA-256 mismatch for %s\n' "$ASSET_NAME" >&2
-  exit 1
-}
-log "SHA-256 verified: $ACTUAL_SHA256"
+if [[ -n "$ASSET_DIGEST" ]]; then
+  EXPECTED_SHA256="${ASSET_DIGEST#sha256:}"
+  [[ "$ACTUAL_SHA256" == "$EXPECTED_SHA256" ]] || {
+    printf 'SHA-256 mismatch for %s\n' "$ASSET_NAME" >&2
+    exit 1
+  }
+  log "SHA-256 verified: $ACTUAL_SHA256"
+else
+  log "downloaded SHA-256 (no upstream digest): $ACTUAL_SHA256"
+fi
 
 tar -xzf "$TMP_DIR/$ASSET_NAME" -C "$TMP_DIR"
-chmod 0755 "$TMP_DIR/fnn" "$TMP_DIR/fnn-cli"
+[[ -f "$TMP_DIR/fnn" ]] || {
+  printf 'package %s has no fnn binary\n' "$ASSET_NAME" >&2
+  exit 1
+}
+chmod 0755 "$TMP_DIR/fnn"
+
+TARGET_CLI_AVAILABLE=0
+TARGET_CLI_VERSION="not included"
+if [[ -f "$TMP_DIR/fnn-cli" ]]; then
+  TARGET_CLI_AVAILABLE=1
+  chmod 0755 "$TMP_DIR/fnn-cli"
+  TARGET_CLI_VERSION="$("$TMP_DIR/fnn-cli" --version | head -n 1)"
+elif [[ "$FNN_SOURCE" == "release" ]]; then
+  printf 'release package %s has no fnn-cli binary\n' "$ASSET_NAME" >&2
+  exit 1
+fi
 
 TARGET_FNN_VERSION="$("$TMP_DIR/fnn" --version | head -n 1)"
-TARGET_CLI_VERSION="$("$TMP_DIR/fnn-cli" --version | head -n 1)"
 NODE1_FNN_VERSION="$("$NODE1_DIR/fnn" --version | head -n 1)"
 NODE2_FNN_VERSION="$("$NODE2_DIR/fnn" --version | head -n 1)"
 NODE1_CLI_VERSION="missing"
@@ -173,7 +251,7 @@ if [[ -x "$NODE1_DIR/fnn-cli" ]]; then
   NODE1_CLI_VERSION="$("$NODE1_DIR/fnn-cli" --version | head -n 1)"
 fi
 
-log "target release : $TARGET_TAG"
+log "target package : $TARGET_LABEL"
 log "target fnn     : $TARGET_FNN_VERSION"
 log "node1 fnn      : $NODE1_FNN_VERSION"
 log "node2 fnn      : $NODE2_FNN_VERSION"
@@ -186,9 +264,12 @@ if [[ "$NODE1_FNN_VERSION" != "$TARGET_FNN_VERSION" \
   || "$NODE2_FNN_VERSION" != "$TARGET_FNN_VERSION" ]]; then
   FNN_NEEDS_UPDATE=1
 fi
-if [[ "$NODE1_CLI_VERSION" != "$TARGET_CLI_VERSION" ]]; then
+if [[ "$TARGET_CLI_AVAILABLE" == "1" \
+  && "$NODE1_CLI_VERSION" != "$TARGET_CLI_VERSION" ]]; then
   CLI_NEEDS_UPDATE=1
 fi
+
+BACKUP_TAG="${TARGET_TAG//\//_}"
 
 if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
   log "stopping Fiber services before validation and replacement"
@@ -209,26 +290,30 @@ if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
     fi
   done
 
-  BACKUP_DIR="$BACKUP_ROOT/$(date -u '+%Y%m%dT%H%M%SZ')-$TARGET_TAG"
+  BACKUP_DIR="$BACKUP_ROOT/$(date -u '+%Y%m%dT%H%M%SZ')-$BACKUP_TAG"
   sudo -n install -d -m 0755 "$BACKUP_DIR"
   sudo -n cp -a "$NODE1_DIR/fnn" "$BACKUP_DIR/node1-fnn"
   sudo -n cp -a "$NODE2_DIR/fnn" "$BACKUP_DIR/node2-fnn"
-  if [[ -e "$NODE1_DIR/fnn-cli" ]]; then
+  if [[ "$TARGET_CLI_AVAILABLE" == "1" && -e "$NODE1_DIR/fnn-cli" ]]; then
     sudo -n cp -a "$NODE1_DIR/fnn-cli" "$BACKUP_DIR/node1-fnn-cli"
   fi
 
   BINARIES_REPLACED=1
-  CLI_REPLACED=1
   sudo -n install -m 0755 "$TMP_DIR/fnn" "$NODE1_DIR/fnn"
   sudo -n install -m 0755 "$TMP_DIR/fnn" "$NODE2_DIR/fnn"
-  sudo -n install -m 0755 "$TMP_DIR/fnn-cli" "$NODE1_DIR/fnn-cli"
+  if [[ "$TARGET_CLI_AVAILABLE" == "1" ]]; then
+    CLI_REPLACED=1
+    sudo -n install -m 0755 "$TMP_DIR/fnn-cli" "$NODE1_DIR/fnn-cli"
+  fi
 
-  log "installed $TARGET_TAG; previous binaries saved in $BACKUP_DIR"
+  log "installed $TARGET_LABEL; previous binaries saved in $BACKUP_DIR"
   start_services
 elif [[ "$CLI_NEEDS_UPDATE" == "1" ]]; then
-  BACKUP_DIR="$BACKUP_ROOT/$(date -u '+%Y%m%dT%H%M%SZ')-$TARGET_TAG"
+  BACKUP_DIR="$BACKUP_ROOT/$(date -u '+%Y%m%dT%H%M%SZ')-$BACKUP_TAG"
   sudo -n install -d -m 0755 "$BACKUP_DIR"
-  sudo -n cp -a "$NODE1_DIR/fnn-cli" "$BACKUP_DIR/node1-fnn-cli"
+  if [[ -e "$NODE1_DIR/fnn-cli" ]]; then
+    sudo -n cp -a "$NODE1_DIR/fnn-cli" "$BACKUP_DIR/node1-fnn-cli"
+  fi
 
   CLI_REPLACED=1
   sudo -n install -m 0755 "$TMP_DIR/fnn-cli" "$NODE1_DIR/fnn-cli"
