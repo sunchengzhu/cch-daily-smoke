@@ -276,19 +276,43 @@ if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
   SERVICES_STOPPED=1
   sudo -n systemctl stop "$SERVICE1" "$SERVICE2"
 
-  for node_dir in "$NODE1_DIR" "$NODE2_DIR"; do
-    log "validating ${node_dir}/fiber/store with $TARGET_TAG"
-    if ! "$TMP_DIR/fnn" \
-      --config "$node_dir/config.yml" \
-      --dir "$node_dir" \
-      --check-validate; then
-      printf '%s\n' \
-        "database validation failed for $node_dir" \
-        "The new binary may require a migration. No binary was replaced." \
-        "Back up the node data and perform the documented migration manually." >&2
-      exit 1
-    fi
-  done
+  log "validating node1 and node2 stores in parallel with $TARGET_TAG"
+  VALIDATION_STARTED_AT="$(date +%s)"
+  "$TMP_DIR/fnn" \
+    --config "$NODE1_DIR/config.yml" \
+    --dir "$NODE1_DIR" \
+    --check-validate >"$TMP_DIR/node1-validation.log" 2>&1 &
+  NODE1_VALIDATION_PID=$!
+  "$TMP_DIR/fnn" \
+    --config "$NODE2_DIR/config.yml" \
+    --dir "$NODE2_DIR" \
+    --check-validate >"$TMP_DIR/node2-validation.log" 2>&1 &
+  NODE2_VALIDATION_PID=$!
+
+  if wait "$NODE1_VALIDATION_PID"; then
+    NODE1_VALIDATION_STATUS=0
+  else
+    NODE1_VALIDATION_STATUS=$?
+  fi
+  if wait "$NODE2_VALIDATION_PID"; then
+    NODE2_VALIDATION_STATUS=0
+  else
+    NODE2_VALIDATION_STATUS=$?
+  fi
+
+  cat "$TMP_DIR/node1-validation.log"
+  cat "$TMP_DIR/node2-validation.log"
+  VALIDATION_ELAPSED="$(( $(date +%s) - VALIDATION_STARTED_AT ))"
+
+  if [[ "$NODE1_VALIDATION_STATUS" != "0" \
+    || "$NODE2_VALIDATION_STATUS" != "0" ]]; then
+    printf '%s\n' \
+      "database validation failed (node1=$NODE1_VALIDATION_STATUS, node2=$NODE2_VALIDATION_STATUS)" \
+      "The new binary may require a migration. No binary was replaced." \
+      "Back up the node data and perform the documented migration manually." >&2
+    exit 1
+  fi
+  log "both node stores validated in ${VALIDATION_ELAPSED}s"
 
   BACKUP_DIR="$BACKUP_ROOT/$(date -u '+%Y%m%dT%H%M%SZ')-$BACKUP_TAG"
   sudo -n install -d -m 0755 "$BACKUP_DIR"

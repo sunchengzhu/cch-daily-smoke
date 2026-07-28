@@ -122,7 +122,7 @@ write("cch");
   SHA-256，但上游未提供摘要，因此无法做外部摘要比对。
 - `fnn` 版本无变化时不重启；只有 `fnn-cli` 落后时直接更新 CLI，不扫描数据库。
 - `fnn` 有新版本时先停止 `fiber-testnet1.service` 和 `fiber-testnet2.service`。
-- 使用新 `fnn --check-validate` 检查两个节点的数据库。只有确认不需要迁移时，
+- 使用新 `fnn --check-validate` 并行检查两个节点的数据库。只有确认不需要迁移时，
   才备份并替换两个节点的 `fnn`，同时更新 node1 的 `fnn-cli`。
 - 当前 develop 包不包含 `fnn-cli`，选择 `develop` 时会保留 node1 已安装的 CLI。
 - 启动服务并等待两个 RPC 返回版本、commit 和 pubkey，成功后才运行 smoke。
