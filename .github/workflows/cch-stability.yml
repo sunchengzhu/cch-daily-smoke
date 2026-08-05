@@ -116,7 +116,7 @@ jobs:
             exit 1
           fi
 
-      - name: Ensure LND outbound liquidity
+      - name: Ensure LND and Fiber outbound liquidity
         if: ${{ inputs.flow == 'lnd-to-fiber' }}
         env:
           CCH_SMOKE_LND_MIN_SPENDABLE_SATS: "1000000"
@@ -127,6 +127,11 @@ jobs:
             --duration-seconds "${{ inputs.duration_seconds }}" \
             --amount-sats "${{ inputs.amount_sats }}" \
             --max-inflight "${{ inputs.max_inflight }}"
+          python scripts/ensure_fiber_liquidity.py \
+            --load-mode "${{ inputs.load_mode }}" \
+            --tps "${{ inputs.tps }}" \
+            --duration-seconds "${{ inputs.duration_seconds }}" \
+            --amount-sats "${{ inputs.amount_sats }}"
 
       - name: Run end-to-end readiness probe
         run: |
