@@ -155,6 +155,22 @@ def hex_to_int(value):
     return int(value, 16) if str(value).startswith("0x") else int(value)
 
 
+def receive_btc_amounts(reported_amount_sats, principal_sats, fee_sats, fiber_source):
+    lightning_amount_sats = principal_sats + fee_sats
+    expected_reported_amounts = (
+        {lightning_amount_sats}
+        if fiber_source == "develop"
+        else {principal_sats, lightning_amount_sats}
+    )
+    if reported_amount_sats not in expected_reported_amounts:
+        raise AssertionError(
+            "unexpected receive_btc amount: "
+            f"{reported_amount_sats}; expected one of "
+            f"{sorted(expected_reported_amounts)}"
+        )
+    return principal_sats, lightning_amount_sats
+
+
 def same_script(left, right):
     return all(
         left.get(key) == right.get(key) for key in ("code_hash", "hash_type", "args")
@@ -633,9 +649,13 @@ def test_cch_daily_smoke_bidirectional():
     assert receive_order["payment_hash"] == receive_payment_hash
     assert same_script(receive_order["wrapped_btc_type_script"], config.udt_script)
     receive_fee_sats = hex_to_int(receive_order["fee_sats"])
-    receive_fiber_amount = hex_to_int(receive_order["amount_sats"])
-    assert receive_fiber_amount == amount_sats
-    lightning_amount = receive_fiber_amount + receive_fee_sats
+    receive_reported_amount = hex_to_int(receive_order["amount_sats"])
+    receive_fiber_amount, lightning_amount = receive_btc_amounts(
+        receive_reported_amount,
+        amount_sats,
+        receive_fee_sats,
+        os.environ.get("CCH_SMOKE_FNN_SOURCE", "release"),
+    )
 
     fiber_before = fiber_balances_from_f2_view(config, fiber_channel_id)
     lnd_before = lnd_channel_balances_from_a(config)

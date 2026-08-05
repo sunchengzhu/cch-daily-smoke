@@ -8,6 +8,7 @@ from test_cch_daily_smoke import (
     format_cwbtc,
     print_asset_convention,
     print_flow_summary,
+    receive_btc_amounts,
     run_cmd,
 )
 
@@ -83,6 +84,20 @@ def test_asset_convention_is_printed_once(capsys):
 
     output = capsys.readouterr().out
     assert output.strip() == "Asset convention (CCH Demo): 1 BTC = 1 cWBTC"
+
+
+def test_receive_btc_develop_amount_includes_fee():
+    assert receive_btc_amounts(110, 100, 10, "develop") == (100, 110)
+
+
+def test_receive_btc_develop_rejects_principal_only_amount():
+    with pytest.raises(AssertionError, match="expected one of \\[110\\]"):
+        receive_btc_amounts(100, 100, 10, "develop")
+
+
+@pytest.mark.parametrize("reported_amount", [100, 110])
+def test_receive_btc_release_accepts_old_and_new_amount_semantics(reported_amount):
+    assert receive_btc_amounts(reported_amount, 100, 10, "release") == (100, 110)
 
 
 def test_balance_failure_includes_channel_details():
