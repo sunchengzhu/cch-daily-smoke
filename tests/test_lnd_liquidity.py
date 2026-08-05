@@ -1,6 +1,58 @@
 from types import SimpleNamespace
 
 import test_cch_daily_smoke as smoke
+from scripts.ensure_lnd_liquidity import minimum_spendable_for_load
+
+
+def test_load_liquidity_keeps_base_floor_for_small_run():
+    minimum, details = minimum_spendable_for_load(
+        base_minimum_sats=1_000_000,
+        load_mode="fixed-tps",
+        tps=2,
+        duration_seconds=300,
+        amount_sats=100,
+        max_inflight=100,
+    )
+
+    assert minimum == 1_000_000
+    assert details == {
+        "target_transactions": 600,
+        "principal_sats": 60_000,
+        "headroom_sats": 100_000,
+    }
+
+
+def test_load_liquidity_scales_with_total_one_way_volume():
+    minimum, details = minimum_spendable_for_load(
+        base_minimum_sats=1_000_000,
+        load_mode="fixed-tps",
+        tps=5,
+        duration_seconds=14_400,
+        amount_sats=100,
+        max_inflight=100,
+    )
+
+    assert minimum == 8_640_000
+    assert details == {
+        "target_transactions": 72_000,
+        "principal_sats": 7_200_000,
+        "headroom_sats": 1_440_000,
+    }
+
+
+def test_load_liquidity_accounts_for_large_inflight_window():
+    minimum, details = minimum_spendable_for_load(
+        base_minimum_sats=1_000_000,
+        load_mode="fixed-tps",
+        tps=1,
+        duration_seconds=10,
+        amount_sats=100_000,
+        max_inflight=100,
+    )
+
+    assert minimum == 11_000_000
+    assert details["principal_sats"] == 1_000_000
+    assert details["headroom_sats"] == 10_000_000
 
 
 def test_top_up_includes_channel_reserve_when_balance_is_below_reserve(

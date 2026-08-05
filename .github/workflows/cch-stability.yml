@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fiber_source:
-        description: "Fiber package source"
+        description: "Fiber 节点当前运行的包来源（由 cch-daily-smoke 保证更新）；影响 receive_btc 金额断言"
         required: false
         default: release
         type: choice
@@ -12,11 +12,6 @@ on:
           - release
           - develop
           - pr
-      fiber_pr_number:
-        description: "Fiber PR number; required when source is pr"
-        required: false
-        default: ""
-        type: string
       flow:
         description: "选择一个完整业务 Flow；两个方向请分别运行"
         required: true
@@ -58,12 +53,11 @@ on:
         required: true
         default: "0"
         type: string
-      update_fnn:
-        description: "测试前是否更新并验证 Fiber 节点"
+      min_actor_rpc_timeout_recoveries:
+        description: "至少观察并成功恢复多少笔 receive_btc actor RPC timeout；复现 #1564 时可填 1"
         required: true
-        default: false
-        type: boolean
-
+        default: "0"
+        type: string
 permissions:
   contents: read
 
@@ -78,7 +72,6 @@ jobs:
     env:
       CCH_SMOKE_ENABLED: "1"
       CCH_SMOKE_FNN_SOURCE: ${{ inputs.fiber_source || 'release' }}
-      CCH_SMOKE_FNN_PR_NUMBER: ${{ inputs.fiber_pr_number || '' }}
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
       CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
       CCH_SMOKE_F2_RPC: http://127.0.0.1:8229
@@ -91,10 +84,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-
-      - name: Update and verify Fiber nodes
-        if: ${{ inputs.update_fnn }}
-        run: scripts/update_fnn.sh
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
@@ -110,6 +99,23 @@ jobs:
             echo "::error::Missing repository secret CCH_SMOKE_FNN_AUTH_TOKEN."
             exit 1
           fi
+
+      - name: Ensure LND and Fiber outbound liquidity
+        if: ${{ inputs.flow == 'lnd-to-fiber' }}
+        env:
+          CCH_SMOKE_LND_MIN_SPENDABLE_SATS: "1000000"
+        run: |
+          python scripts/ensure_lnd_liquidity.py \
+            --load-mode "${{ inputs.load_mode }}" \
+            --tps "${{ inputs.tps }}" \
+            --duration-seconds "${{ inputs.duration_seconds }}" \
+            --amount-sats "${{ inputs.amount_sats }}" \
+            --max-inflight "${{ inputs.max_inflight }}"
+          python scripts/ensure_fiber_liquidity.py \
+            --load-mode "${{ inputs.load_mode }}" \
+            --tps "${{ inputs.tps }}" \
+            --duration-seconds "${{ inputs.duration_seconds }}" \
+            --amount-sats "${{ inputs.amount_sats }}"
 
       - name: Run end-to-end readiness probe
         run: |
@@ -128,6 +134,7 @@ jobs:
             --amount-sats "${{ inputs.amount_sats }}" \
             --max-inflight "${{ inputs.max_inflight }}" \
             --max-failure-rate "${{ inputs.max_failure_rate }}" \
+            --min-actor-rpc-timeout-recoveries "${{ inputs.min_actor_rpc_timeout_recoveries }}" \
             --output-dir reports/stability
 
       - name: Build readable stability reports

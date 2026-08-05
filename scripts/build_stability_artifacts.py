@@ -19,6 +19,9 @@ CSV_COLUMNS = [
     "fee_sats",
     "source_amount",
     "destination_amount",
+    "receive_btc_attempts",
+    "receive_btc_recovered",
+    "actor_rpc_timeout_recovered",
     "error_type",
     "error",
     "payment_hash",
@@ -82,6 +85,12 @@ def partial_summary(
         math.ceil(target_tps * duration) if mode == "fixed-tps" else None
     )
     unsuccessful = statuses["failed"] + statuses["rejected"]
+    recovered_receive_btc = sum(
+        record.get("receive_btc_recovered") is True for record in transactions
+    )
+    recovered_actor_rpc_timeouts = sum(
+        record.get("actor_rpc_timeout_recovered") is True for record in transactions
+    )
     return {
         "type": "summary",
         "flow": flow,
@@ -93,6 +102,8 @@ def partial_summary(
         "scheduled": recorded,
         "started": recorded - statuses["rejected"],
         "succeeded": statuses["success"],
+        "recovered_receive_btc": recovered_receive_btc,
+        "recovered_actor_rpc_timeouts": recovered_actor_rpc_timeouts,
         "failed": statuses["failed"],
         "rejected": statuses["rejected"],
         "failure_rate": round(unsuccessful / recorded, 6) if recorded else None,
@@ -165,11 +176,25 @@ def summary_markdown(summary: dict[str, Any]) -> str:
     rows = [
         ("Result", result),
         ("Flow", summary.get("flow")),
+        ("Fiber package source", summary.get("fiber_source", "unspecified")),
         ("Load mode", summary.get("load_mode")),
         ("Target TPS", summary.get("target_tps")),
         ("Target transactions", summary.get("target_transactions")),
         ("Recorded transactions", summary.get("recorded_transactions", summary.get("scheduled"))),
         ("Succeeded", summary.get("succeeded")),
+        ("Recovered receive_btc flows", summary.get("recovered_receive_btc", 0)),
+        (
+            "Recovered receive_btc actor RPC timeouts",
+            summary.get("recovered_actor_rpc_timeouts", 0),
+        ),
+        (
+            "Required receive_btc actor RPC timeout recoveries",
+            summary.get("min_actor_rpc_timeout_recoveries", 0),
+        ),
+        (
+            "Actor RPC timeout coverage met",
+            summary.get("actor_rpc_timeout_coverage_met", True),
+        ),
         ("Failed", summary.get("failed")),
         ("Rejected", summary.get("rejected")),
         ("Failure rate", failure_rate_display),
