@@ -1,6 +1,8 @@
 import csv
 import json
 
+import pytest
+
 from scripts.build_stability_artifacts import build_artifacts
 
 
@@ -31,6 +33,7 @@ def test_interrupted_run_builds_partial_readable_reports(tmp_path):
                 latency_ms=1000,
                 receive_btc_recovered=True,
                 actor_rpc_timeout_recovered=True,
+                receive_btc_recovery_reasons=["actor_rpc_timeout", "order_recovery"],
             ),
             transaction(2, latency_ms=3000),
         ],
@@ -58,7 +61,19 @@ def test_interrupted_run_builds_partial_readable_reports(tmp_path):
         encoding="utf-8"
     )
     with paths["transactions_csv"].open(encoding="utf-8") as source_csv:
-        assert len(list(csv.DictReader(source_csv))) == 2
+        rows = list(csv.DictReader(source_csv))
+    assert len(rows) == 2
+    assert json.loads(rows[0]["receive_btc_recovery_reasons"]) == [
+        "actor_rpc_timeout",
+        "order_recovery",
+    ]
+    assert not rows[0].get("fiber_source")
+    markdown = paths["summary_md"].read_text(encoding="utf-8")
+    assert (
+        "| receive_btc recovery reasons | actor_rpc_timeout: 1, order_recovery: 1 |"
+        in markdown
+    )
+    assert "Fiber package source" not in markdown
 
 
 def test_completed_summary_is_preserved_and_failures_are_separate(tmp_path):

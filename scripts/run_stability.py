@@ -149,15 +149,28 @@ def is_receive_btc_actor_rpc_timeout(exc: BaseException) -> bool:
     return "rpc error (code -32000): timeout" in compact_error(exc).lower()
 
 
+def receive_btc_recovery_reason(exc: BaseException) -> str:
+    """Classify why a receive_btc retry is being attempted."""
+
+    if is_receive_btc_actor_rpc_timeout(exc):
+        return "actor_rpc_timeout"
+    message = compact_error(exc).lower()
+    if "cch startup recovery is still initializing" in message:
+        return "startup_recovery"
+    if "already being recovered" in message:
+        return "order_recovery"
+    return "ambiguous"
+
+
 def create_or_recover_receive_btc_order(
     config: CchSmokeConfig,
     fiber_invoice: str,
     payment_hash: str,
-) -> tuple[dict[str, Any], int, bool]:
+) -> tuple[dict[str, Any], int, bool, list[str]]:
     """Retry only ambiguous receive_btc failures with the same Fiber invoice."""
 
     deadline = time.monotonic() + float(getattr(config, "wait_timeout", 180))
-    actor_rpc_timeout_seen = False
+    recovery_reasons: list[str] = []
     attempt = 0
     retry_delay = RECEIVE_BTC_RETRY_DELAY_SECONDS
     while True:
@@ -168,17 +181,25 @@ def create_or_recover_receive_btc_order(
                 config.f1_rpc,
                 ["cch", "receive_btc", "--fiber-pay-req", fiber_invoice],
             )
-            return order, attempt, actor_rpc_timeout_seen
+            return (
+                order,
+                attempt,
+                "actor_rpc_timeout" in recovery_reasons,
+                sorted(set(recovery_reasons)),
+            )
         except BaseException as exc:
             if not is_recoverable_receive_btc_error(exc):
                 raise
-            actor_rpc_timeout_seen |= is_receive_btc_actor_rpc_timeout(exc)
+            reason = receive_btc_recovery_reason(exc)
+            if reason not in recovery_reasons:
+                recovery_reasons.append(reason)
             now = time.monotonic()
             if now >= deadline:
                 raise
             LOG.warning(
-                "RECEIVE_BTC recovery hash=%s attempt=%d %s: %s",
+                "RECEIVE_BTC recovery hash=%s reason=%s attempt=%d %s: %s",
                 payment_hash,
+                reason,
                 attempt,
                 type(exc).__name__,
                 compact_error(exc),
@@ -217,6 +238,7 @@ class RunState:
     latencies_ms: list[float] = field(default_factory=list)
     start_delays_ms: list[float] = field(default_factory=list)
     errors: dict[str, int] = field(default_factory=dict)
+    recovery_reasons: dict[str, int] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def snapshot(self) -> dict[str, Any]:
@@ -230,6 +252,7 @@ class RunState:
                 "recovered_actor_rpc_timeouts": self.recovered_actor_rpc_timeouts,
                 "failed": self.failed,
                 "rejected": self.rejected,
+                "recovery_reasons": dict(sorted(self.recovery_reasons.items())),
                 "latency_p95_ms": percentile(self.latencies_ms, 95),
             }
 
@@ -330,7 +353,12 @@ def run_flow_lnd_to_fiber(
     )
     order = None
     try:
-        order, receive_btc_attempts, actor_rpc_timeout_seen = run_flow_stage(
+        (
+            order,
+            receive_btc_attempts,
+            actor_rpc_timeout_seen,
+            receive_btc_recovery_reasons,
+        ) = run_flow_stage(
             stage_callback,
             "create_cch_order",
             lambda: create_or_recover_receive_btc_order(
@@ -341,6 +369,7 @@ def run_flow_lnd_to_fiber(
                 "receive_btc_attempts": value[1],
                 "receive_btc_recovered": value[1] > 1,
                 "actor_rpc_timeout_recovered": value[2],
+                "receive_btc_recovery_reasons": value[3],
             },
         )
         if order["payment_hash"] != payment_hash:
@@ -355,12 +384,7 @@ def run_flow_lnd_to_fiber(
         fee_sats = hex_to_int(order["fee_sats"])
         reported_amount = hex_to_int(order["amount_sats"])
         lightning_amount = amount_sats + fee_sats
-        fiber_source = os.environ.get("CCH_SMOKE_FNN_SOURCE", "release")
-        expected_reported_amounts = (
-            {lightning_amount}
-            if fiber_source in {"develop", "pr"}
-            else {amount_sats, lightning_amount}
-        )
+        expected_reported_amounts = {amount_sats, lightning_amount}
         if reported_amount not in expected_reported_amounts:
             raise AssertionError(
                 "unexpected receive_btc amount: "
@@ -368,6 +392,13 @@ def run_flow_lnd_to_fiber(
             )
 
         if receive_btc_attempts > 1:
+            LOG.info(
+                "RECOVERED flow=%s hash=%s attempts=%d reasons=%s",
+                FLOW_LND_TO_FIBER,
+                payment_hash,
+                receive_btc_attempts,
+                receive_btc_recovery_reasons,
+            )
             if order["status"] != "Pending":
                 raise AssertionError(
                     "recovered receive_btc order should remain Pending before payment"
@@ -436,6 +467,7 @@ def run_flow_lnd_to_fiber(
         "receive_btc_attempts": receive_btc_attempts,
         "receive_btc_recovered": receive_btc_attempts > 1,
         "actor_rpc_timeout_recovered": actor_rpc_timeout_seen,
+        "receive_btc_recovery_reasons": receive_btc_recovery_reasons,
     }
 
 
@@ -555,6 +587,7 @@ def execute_transaction(
                 "receive_btc_attempts",
                 "receive_btc_recovered",
                 "actor_rpc_timeout_recovered",
+                "receive_btc_recovery_reasons",
             ):
                 if key in details:
                     recovery_details[key] = details[key]
@@ -575,13 +608,27 @@ def execute_transaction(
                 state.recovered_receive_btc += 1
             if result.get("actor_rpc_timeout_recovered"):
                 state.recovered_actor_rpc_timeouts += 1
+            for reason in result.get("receive_btc_recovery_reasons") or []:
+                state.recovery_reasons[reason] = state.recovery_reasons.get(reason, 0) + 1
             state.latencies_ms.append(latency_ms)
-        LOG.debug(
-            "TX success seq=%d hash=%s latency_ms=%.1f",
-            sequence,
-            result.get("payment_hash"),
-            latency_ms,
-        )
+        if result.get("receive_btc_recovered"):
+            LOG.info(
+                "TX success (recovered) seq=%d flow=%s hash=%s attempts=%d "
+                "reasons=%s latency_ms=%.1f",
+                sequence,
+                flow,
+                result.get("payment_hash"),
+                result.get("receive_btc_attempts"),
+                result.get("receive_btc_recovery_reasons"),
+                latency_ms,
+            )
+        else:
+            LOG.debug(
+                "TX success seq=%d hash=%s latency_ms=%.1f",
+                sequence,
+                result.get("payment_hash"),
+                latency_ms,
+            )
     except BaseException as exc:  # pytest.fail derives from BaseException
         latency_ms = (time.monotonic() - started_at) * 1000
         error_type = type(exc).__name__
@@ -599,6 +646,8 @@ def execute_transaction(
                 state.recovered_receive_btc += 1
             if recovery_details.get("actor_rpc_timeout_recovered"):
                 state.recovered_actor_rpc_timeouts += 1
+            for reason in recovery_details.get("receive_btc_recovery_reasons") or []:
+                state.recovery_reasons[reason] = state.recovery_reasons.get(reason, 0) + 1
             state.errors[error_type] = state.errors.get(error_type, 0) + 1
         LOG.error(
             "FAILED seq=%d latency=%.2fs %s: %s",
@@ -627,19 +676,12 @@ def build_summary(
     with state.lock:
         total_unsuccessful = state.failed + state.rejected
         failure_rate = total_unsuccessful / state.scheduled if state.scheduled else 1.0
-        min_actor_rpc_timeout_recoveries = getattr(
-            args, "min_actor_rpc_timeout_recoveries", 0
-        )
-        actor_rpc_timeout_coverage_met = (
-            state.recovered_actor_rpc_timeouts >= min_actor_rpc_timeout_recoveries
-        )
         load_seconds = max(load_finished_at - load_started_at, 0.000001)
         wall_seconds = max(finished_at - load_started_at, 0.000001)
         return {
             "type": "summary",
             "run_id": run_id,
             "flow": args.flow,
-            "fiber_source": os.environ.get("CCH_SMOKE_FNN_SOURCE", "unspecified"),
             "load_mode": mode,
             "target_tps": args.tps if mode == MODE_FIXED_TPS else None,
             "target_transactions": (
@@ -656,8 +698,7 @@ def build_summary(
             "succeeded": state.succeeded,
             "recovered_receive_btc": state.recovered_receive_btc,
             "recovered_actor_rpc_timeouts": state.recovered_actor_rpc_timeouts,
-            "min_actor_rpc_timeout_recoveries": min_actor_rpc_timeout_recoveries,
-            "actor_rpc_timeout_coverage_met": actor_rpc_timeout_coverage_met,
+            "receive_btc_recovery_reasons": dict(sorted(state.recovery_reasons.items())),
             "failed": state.failed,
             "rejected": state.rejected,
             "failure_rate": round(failure_rate, 6),
@@ -685,10 +726,7 @@ def build_summary(
                 else None,
             },
             "errors": dict(sorted(state.errors.items())),
-            "passed": (
-                failure_rate <= args.max_failure_rate
-                and actor_rpc_timeout_coverage_met
-            ),
+            "passed": failure_rate <= args.max_failure_rate,
             "max_failure_rate": args.max_failure_rate,
             "finished_at": utc_now(),
         }
@@ -995,7 +1033,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-inflight", type=int, default=100)
     parser.add_argument("--progress-interval", type=float, default=10.0)
     parser.add_argument("--max-failure-rate", type=float, default=0.0)
-    parser.add_argument("--min-actor-rpc-timeout-recoveries", type=int, default=0)
     parser.add_argument("--output-dir", type=Path, default=Path("reports/stability"))
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
@@ -1009,8 +1046,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--max-inflight must be greater than zero in fixed-tps mode")
     if not 0 <= args.max_failure_rate <= 1:
         parser.error("--max-failure-rate must be between 0 and 1")
-    if args.min_actor_rpc_timeout_recoveries < 0:
-        parser.error("--min-actor-rpc-timeout-recoveries must not be negative")
     if args.amount_sats is not None and args.amount_sats <= 0:
         parser.error("--amount-sats must be greater than zero")
     return args

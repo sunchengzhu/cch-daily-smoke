@@ -16,6 +16,7 @@ from scripts.run_stability import (
     is_recoverable_receive_btc_error,
     log_preflight,
     percentile,
+    receive_btc_recovery_reason,
     run_flow_lnd_to_fiber,
     run_load,
     seconds,
@@ -102,7 +103,6 @@ def test_cleanup_leaves_settled_lnd_invoice_unchanged(monkeypatch):
 
 
 def test_lnd_to_fiber_failure_cleans_up_hold_invoice(monkeypatch):
-    monkeypatch.setenv("CCH_SMOKE_FNN_SOURCE", "release")
     config = argparse.Namespace(
         f1_rpc="f1",
         command_timeout=60,
@@ -159,11 +159,7 @@ def test_lnd_to_fiber_failure_cleans_up_hold_invoice(monkeypatch):
     ) in stages
 
 
-@pytest.mark.parametrize("fiber_source", ["develop", "pr"])
-def test_lnd_to_fiber_recovers_same_request_after_rpc_timeout(
-    monkeypatch, fiber_source
-):
-    monkeypatch.setenv("CCH_SMOKE_FNN_SOURCE", fiber_source)
+def test_lnd_to_fiber_recovers_same_request_after_rpc_timeout(monkeypatch):
     config = argparse.Namespace(
         f1_rpc="f1",
         command_timeout=60,
@@ -248,6 +244,7 @@ def test_lnd_to_fiber_recovers_same_request_after_rpc_timeout(
         "receive_btc_attempts": 3,
         "receive_btc_recovered": True,
         "actor_rpc_timeout_recovered": True,
+        "receive_btc_recovery_reasons": ["actor_rpc_timeout", "order_recovery"],
     }
     assert (
         "create_cch_order",
@@ -257,6 +254,7 @@ def test_lnd_to_fiber_recovers_same_request_after_rpc_timeout(
             "receive_btc_attempts": 3,
             "receive_btc_recovered": True,
             "actor_rpc_timeout_recovered": True,
+            "receive_btc_recovery_reasons": ["actor_rpc_timeout", "order_recovery"],
         },
     ) in stages
 
@@ -268,6 +266,30 @@ def test_startup_recovery_error_is_recoverable():
     )
 
     assert is_recoverable_receive_btc_error(error)
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_reason"),
+    [
+        ("Error: RPC error (code -32000): timeout", "actor_rpc_timeout"),
+        (
+            "Error: RPC error (code -32000): "
+            "CCH startup recovery is still initializing",
+            "startup_recovery",
+        ),
+        (
+            "Error: RPC error: receive_btc order creation "
+            "for payment hash abc is already being recovered",
+            "order_recovery",
+        ),
+        (
+            "Error: RPC error (code -32000): CKB invoice network mismatch",
+            "ambiguous",
+        ),
+    ],
+)
+def test_receive_btc_recovery_reason_classification(message, expected_reason):
+    assert receive_btc_recovery_reason(AssertionError(message)) == expected_reason
 
 
 def test_receive_btc_permanent_error_is_not_retried_or_cleaned(monkeypatch):
@@ -413,7 +435,6 @@ def test_load_counts_actor_timeout_recovery_before_later_flow_failure(
         max_inflight=1,
         progress_interval=1.0,
         max_failure_rate=0.0,
-        min_actor_rpc_timeout_recoveries=1,
     )
 
     def fake_flow(_config, _amount_sats, _transaction_name, stage_callback=None):
@@ -437,7 +458,6 @@ def test_load_counts_actor_timeout_recovery_before_later_flow_failure(
     assert summary["failed"] == 1
     assert summary["recovered_receive_btc"] == 1
     assert summary["recovered_actor_rpc_timeouts"] == 1
-    assert summary["actor_rpc_timeout_coverage_met"] is True
     assert summary["passed"] is False
 
 

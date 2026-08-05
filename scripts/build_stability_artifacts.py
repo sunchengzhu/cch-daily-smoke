@@ -22,6 +22,7 @@ CSV_COLUMNS = [
     "receive_btc_attempts",
     "receive_btc_recovered",
     "actor_rpc_timeout_recovered",
+    "receive_btc_recovery_reasons",
     "error_type",
     "error",
     "payment_hash",
@@ -91,6 +92,11 @@ def partial_summary(
     recovered_actor_rpc_timeouts = sum(
         record.get("actor_rpc_timeout_recovered") is True for record in transactions
     )
+    recovery_reasons = Counter(
+        reason
+        for record in transactions
+        for reason in record.get("receive_btc_recovery_reasons") or []
+    )
     return {
         "type": "summary",
         "flow": flow,
@@ -104,6 +110,7 @@ def partial_summary(
         "succeeded": statuses["success"],
         "recovered_receive_btc": recovered_receive_btc,
         "recovered_actor_rpc_timeouts": recovered_actor_rpc_timeouts,
+        "receive_btc_recovery_reasons": dict(sorted(recovery_reasons.items())),
         "failed": statuses["failed"],
         "rejected": statuses["rejected"],
         "failure_rate": round(unsuccessful / recorded, 6) if recorded else None,
@@ -151,7 +158,15 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as destination:
         writer = csv.DictWriter(destination, fieldnames=CSV_COLUMNS, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(records)
+        writer.writerows(
+            {
+                key: json.dumps(value, ensure_ascii=False)
+                if isinstance(value, (list, dict))
+                else value
+                for key, value in record.items()
+            }
+            for record in records
+        )
 
 
 def format_value(value: Any) -> str:
@@ -176,7 +191,6 @@ def summary_markdown(summary: dict[str, Any]) -> str:
     rows = [
         ("Result", result),
         ("Flow", summary.get("flow")),
-        ("Fiber package source", summary.get("fiber_source", "unspecified")),
         ("Load mode", summary.get("load_mode")),
         ("Target TPS", summary.get("target_tps")),
         ("Target transactions", summary.get("target_transactions")),
@@ -194,6 +208,16 @@ def summary_markdown(summary: dict[str, Any]) -> str:
         (
             "Actor RPC timeout coverage met",
             summary.get("actor_rpc_timeout_coverage_met", True),
+        ),
+        (
+            "receive_btc recovery reasons",
+            ", ".join(
+                f"{name}: {count}"
+                for name, count in (
+                    summary.get("receive_btc_recovery_reasons") or {}
+                ).items()
+            )
+            or "none",
         ),
         ("Failed", summary.get("failed")),
         ("Rejected", summary.get("rejected")),

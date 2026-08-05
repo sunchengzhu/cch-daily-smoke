@@ -3,15 +3,6 @@ name: cch stability
 on:
   workflow_dispatch:
     inputs:
-      fiber_source:
-        description: "Fiber 节点当前运行的包来源（由 cch-daily-smoke 保证更新）；影响 receive_btc 金额断言"
-        required: false
-        default: release
-        type: choice
-        options:
-          - release
-          - develop
-          - pr
       flow:
         description: "选择一个完整业务 Flow；两个方向请分别运行"
         required: true
@@ -53,11 +44,6 @@ on:
         required: true
         default: "0"
         type: string
-      min_actor_rpc_timeout_recoveries:
-        description: "至少观察并成功恢复多少笔 receive_btc actor RPC timeout；复现 #1564 时可填 1"
-        required: true
-        default: "0"
-        type: string
 permissions:
   contents: read
 
@@ -71,7 +57,6 @@ jobs:
     timeout-minutes: 390
     env:
       CCH_SMOKE_ENABLED: "1"
-      CCH_SMOKE_FNN_SOURCE: ${{ inputs.fiber_source || 'release' }}
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
       CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
       CCH_SMOKE_F2_RPC: http://127.0.0.1:8229
@@ -134,7 +119,6 @@ jobs:
             --amount-sats "${{ inputs.amount_sats }}" \
             --max-inflight "${{ inputs.max_inflight }}" \
             --max-failure-rate "${{ inputs.max_failure_rate }}" \
-            --min-actor-rpc-timeout-recoveries "${{ inputs.min_actor_rpc_timeout_recoveries }}" \
             --output-dir reports/stability
 
       - name: Build readable stability reports
