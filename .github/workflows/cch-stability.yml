@@ -54,7 +54,7 @@ concurrency:
 jobs:
   cch-stability:
     runs-on: [self-hosted, test-new-02]
-    timeout-minutes: 390
+    timeout-minutes: 270
     env:
       CCH_SMOKE_ENABLED: "1"
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
@@ -86,7 +86,6 @@ jobs:
           fi
 
       - name: Ensure LND and Fiber outbound liquidity
-        if: ${{ inputs.flow == 'lnd-to-fiber' }}
         env:
           CCH_SMOKE_LND_MIN_SPENDABLE_SATS: "1000000"
         run: |
