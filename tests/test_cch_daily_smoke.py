@@ -16,6 +16,8 @@ CWBTC_SCRIPT = {
     "args": "0x9a1086531ed6dc69e0bd44cef5278e03faf3015b31aff60b08fb87663ce8507100000000",
 }
 DAILY_SMOKE_AMOUNT_SATS = 100
+CCH_STARTUP_RETRY_DELAY_SECONDS = 1.0
+CCH_STARTUP_RETRY_MAX_DELAY_SECONDS = 8.0
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("CCH_SMOKE_ENABLED") != "1",
@@ -115,6 +117,55 @@ def fnn(config, rpc_url, args, timeout=None):
         cmd.extend(["--auth-token-file", os.environ["CCH_SMOKE_FNN_AUTH_TOKEN_FILE"]])
     cmd.extend(args)
     return parse_json(run_cmd(cmd, timeout or config.command_timeout))
+
+
+def is_retryable_cch_initialization_error(exc, method):
+    """Return whether the same startup-time CCH request can be retried safely."""
+
+    message = str(exc).lower()
+    if "cch startup recovery is still initializing" in message:
+        return True
+    if "rpc error (code -32000): timeout" in message:
+        return True
+    return (
+        method == "receive_btc"
+        and "receive_btc order creation" in message
+        and "already being recovered" in message
+    )
+
+
+def call_cch_mutation_after_startup(config, args):
+    """Retry one exact CCH mutation while startup recovery becomes ready.
+
+    PR #1607 returns an explicit initialization error. v0.9.0-rc7 can instead
+    hit the legacy one-second actor RPC timeout; its closed-port and durable
+    creation guards make retrying the unchanged request safe.
+    """
+
+    method = args[1]
+    deadline = time.monotonic() + config.wait_timeout
+    retry_delay = CCH_STARTUP_RETRY_DELAY_SECONDS
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return fnn(config, config.f1_rpc, args)
+        except AssertionError as exc:
+            if not is_retryable_cch_initialization_error(exc, method):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            sleep_seconds = min(retry_delay, remaining)
+            print(
+                f"CCH {method} is not ready after attempt {attempt}; "
+                f"retrying in {sleep_seconds:.1f}s"
+            )
+            time.sleep(sleep_seconds)
+            retry_delay = min(
+                retry_delay * 2,
+                CCH_STARTUP_RETRY_MAX_DELAY_SECONDS,
+            )
 
 
 def lncli_prefix(config, node_name):
@@ -555,9 +606,8 @@ def test_cch_daily_smoke_bidirectional():
         amount_sats,
         f"cch-smoke-fiber-to-lnd-{int(time.time())}",
     )
-    send_order = fnn(
+    send_order = call_cch_mutation_after_startup(
         config,
-        config.f1_rpc,
         [
             "cch",
             "send_btc",
@@ -641,9 +691,8 @@ def test_cch_daily_smoke_bidirectional():
 
     # lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2
     fiber_invoice, receive_payment_hash = create_fiber_invoice(config, amount_sats)
-    receive_order = fnn(
+    receive_order = call_cch_mutation_after_startup(
         config,
-        config.f1_rpc,
         ["cch", "receive_btc", "--fiber-pay-req", fiber_invoice],
     )
     assert receive_order["payment_hash"] == receive_payment_hash
