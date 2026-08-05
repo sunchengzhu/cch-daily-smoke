@@ -1,13 +1,18 @@
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 
 import pytest
 
 from test_cch_daily_smoke import (
     active_lnd_channel,
     assert_balance_delta,
+    call_cch_mutation_after_startup,
+    cch_initialization_retry_reason,
     format_cwbtc,
+    is_retryable_cch_initialization_error,
     print_asset_convention,
     print_flow_summary,
+    receive_btc_amounts,
     run_cmd,
 )
 
@@ -83,6 +88,100 @@ def test_asset_convention_is_printed_once(capsys):
 
     output = capsys.readouterr().out
     assert output.strip() == "Asset convention (CCH Demo): 1 BTC = 1 cWBTC"
+
+
+def test_receive_btc_develop_amount_includes_fee():
+    assert receive_btc_amounts(110, 100, 10, "develop") == (100, 110)
+
+
+def test_receive_btc_develop_rejects_principal_only_amount():
+    with pytest.raises(AssertionError, match="expected one of \\[110\\]"):
+        receive_btc_amounts(100, 100, 10, "develop")
+
+
+def test_receive_btc_pr_uses_develop_amount_semantics():
+    assert receive_btc_amounts(110, 100, 10, "pr") == (100, 110)
+    with pytest.raises(AssertionError, match="expected one of \\[110\\]"):
+        receive_btc_amounts(100, 100, 10, "pr")
+
+
+@pytest.mark.parametrize("reported_amount", [100, 110])
+def test_receive_btc_release_accepts_old_and_new_amount_semantics(reported_amount):
+    assert receive_btc_amounts(reported_amount, 100, 10, "release") == (100, 110)
+
+
+@pytest.mark.parametrize(
+    ("method", "message", "expected_reason"),
+    [
+        (
+            "send_btc",
+            "Error: RPC error (code -32000): timeout",
+            "legacy actor RPC timeout",
+        ),
+        (
+            "send_btc",
+            "Error: RPC error (code -32000): "
+            "CCH startup recovery is still initializing",
+            "startup recovery in progress",
+        ),
+        (
+            "receive_btc",
+            "receive_btc order creation for payment hash abc "
+            "is already being recovered",
+            "receive_btc order creation is already being recovered",
+        ),
+    ],
+)
+def test_cch_initialization_errors_are_retryable(method, message, expected_reason):
+    error = AssertionError(message)
+    assert cch_initialization_retry_reason(error, method) == expected_reason
+    assert is_retryable_cch_initialization_error(error, method)
+
+
+def test_permanent_cch_error_is_not_retryable():
+    error = AssertionError("Error: RPC error (code -32000): invoice network mismatch")
+    assert cch_initialization_retry_reason(error, "send_btc") is None
+    assert not is_retryable_cch_initialization_error(error, "send_btc")
+
+
+@pytest.mark.parametrize(
+    "initial_error",
+    [
+        "Error: RPC error (code -32000): timeout",
+        "CCH startup recovery is still initializing",
+    ],
+)
+def test_cch_mutation_retries_startup_error_with_same_request(
+    monkeypatch, initial_error
+):
+    config = SimpleNamespace(f1_rpc="http://fiber", wait_timeout=10)
+    args = ["cch", "send_btc", "--btc-pay-req", "invoice"]
+    responses = [
+        AssertionError(initial_error),
+        {"payment_hash": "0xabc"},
+    ]
+    calls = []
+
+    def fake_fnn(actual_config, rpc_url, actual_args):
+        calls.append((actual_config, rpc_url, actual_args))
+        response = responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    monkeypatch.setattr("test_cch_daily_smoke.fnn", fake_fnn)
+    monotonic_times = iter([0.0, 0.1])
+    monkeypatch.setattr(
+        "test_cch_daily_smoke.time.monotonic", lambda: next(monotonic_times)
+    )
+    retry_delays = []
+    monkeypatch.setattr("test_cch_daily_smoke.time.sleep", retry_delays.append)
+
+    assert call_cch_mutation_after_startup(config, args) == {
+        "payment_hash": "0xabc"
+    }
+    assert calls == [(config, config.f1_rpc, args)] * 2
+    assert retry_delays == [1.0]
 
 
 def test_balance_failure_includes_channel_details():

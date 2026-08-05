@@ -5,7 +5,8 @@ set -Eeuo pipefail
 REPOSITORY="${CCH_SMOKE_FNN_REPOSITORY:-nervosnetwork/fiber}"
 RELEASE_TAG="${CCH_SMOKE_FNN_RELEASE_TAG:-}"
 FNN_SOURCE="${CCH_SMOKE_FNN_SOURCE:-${CCH_SMOKE_FNN_VERSION:-release}}"
-DEVELOP_CONF_URL="${CCH_SMOKE_FNN_DEVELOP_CONF_URL:-https://github-test-logs.ckbapp.dev/fiber/fnn.conf}"
+FNN_PR_NUMBER="${CCH_SMOKE_FNN_PR_NUMBER:-}"
+FNN_CONF_URL="${CCH_SMOKE_FNN_CONF_URL:-${CCH_SMOKE_FNN_DEVELOP_CONF_URL:-https://github-test-logs.ckbapp.dev/fiber/fnn.conf}}"
 NODE1_DIR="${CCH_SMOKE_NODE1_DIR:-/home/ckb/fiber-test/testnet/node1}"
 NODE2_DIR="${CCH_SMOKE_NODE2_DIR:-/home/ckb/fiber-test/testnet/node2}"
 SERVICE1="${CCH_SMOKE_FIBER_SERVICE1:-fiber-testnet1.service}"
@@ -132,6 +133,10 @@ esac
 case "$FNN_SOURCE" in
   latest | release)
     FNN_SOURCE="release"
+    [[ -z "$FNN_PR_NUMBER" ]] || {
+      printf 'CCH_SMOKE_FNN_PR_NUMBER can only be used with source=pr\n' >&2
+      exit 1
+    }
     if [[ -n "$RELEASE_TAG" ]]; then
       log "resolving requested release $RELEASE_TAG"
       RELEASE_JSON="$(
@@ -171,40 +176,59 @@ case "$FNN_SOURCE" in
     }
     TARGET_LABEL="release $TARGET_TAG"
     ;;
-  develop)
+  develop | pr)
     [[ -z "$RELEASE_TAG" ]] || {
-      printf 'CCH_SMOKE_FNN_RELEASE_TAG cannot be used with develop\n' >&2
+      printf 'CCH_SMOKE_FNN_RELEASE_TAG cannot be used with %s\n' \
+        "$FNN_SOURCE" >&2
       exit 1
     }
 
-    log "resolving latest develop package from $DEVELOP_CONF_URL"
-    DEVELOP_CONF="$TMP_DIR/fnn.conf"
-    curl -fsSL --retry 3 -o "$DEVELOP_CONF" "$DEVELOP_CONF_URL"
+    if [[ "$FNN_SOURCE" == "develop" ]]; then
+      [[ -z "$FNN_PR_NUMBER" ]] || {
+        printf 'CCH_SMOKE_FNN_PR_NUMBER can only be used with source=pr\n' >&2
+        exit 1
+      }
+      PACKAGE_CHANNEL="develop"
+      PACKAGE_DESCRIPTION="develop"
+    else
+      [[ "$FNN_PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'source=pr requires a positive CCH_SMOKE_FNN_PR_NUMBER\n' >&2
+        exit 1
+      }
+      PACKAGE_CHANNEL="pr${FNN_PR_NUMBER}"
+      PACKAGE_DESCRIPTION="PR #${FNN_PR_NUMBER}"
+    fi
 
-    DEVELOP_BASE_URL="$(read_fnn_conf_value FNN_BASE_URL "$DEVELOP_CONF")"
-    ASSET_NAME="$(read_fnn_conf_value TARBALL_develop "$DEVELOP_CONF")"
-    [[ -n "$DEVELOP_BASE_URL" && -n "$ASSET_NAME" ]] || {
-      printf 'fnn.conf has no FNN_BASE_URL or TARBALL_develop\n' >&2
+    log "resolving $PACKAGE_DESCRIPTION package from $FNN_CONF_URL"
+    PACKAGE_CONF="$TMP_DIR/fnn.conf"
+    curl -fsSL --retry 3 -o "$PACKAGE_CONF" "$FNN_CONF_URL"
+
+    PACKAGE_BASE_URL="$(read_fnn_conf_value FNN_BASE_URL "$PACKAGE_CONF")"
+    ASSET_KEY="TARBALL_${PACKAGE_CHANNEL}"
+    ASSET_NAME="$(read_fnn_conf_value "$ASSET_KEY" "$PACKAGE_CONF")"
+    [[ -n "$PACKAGE_BASE_URL" && -n "$ASSET_NAME" ]] || {
+      printf 'fnn.conf has no FNN_BASE_URL or %s\n' "$ASSET_KEY" >&2
       exit 1
     }
 
     ESCAPED_ASSET_SUFFIX="${ASSET_SUFFIX//./\\.}"
-    DEVELOP_ASSET_PATTERN="^fnn_develop_[0-9]{8}_[0-9a-f]{7,40}-${ESCAPED_ASSET_SUFFIX}$"
-    [[ "$ASSET_NAME" =~ $DEVELOP_ASSET_PATTERN ]] || {
-      printf 'unexpected develop package for this architecture: %s\n' "$ASSET_NAME" >&2
+    PACKAGE_ASSET_PATTERN="^fnn_${PACKAGE_CHANNEL}_[0-9]{8}_[0-9a-f]{7,40}-${ESCAPED_ASSET_SUFFIX}$"
+    [[ "$ASSET_NAME" =~ $PACKAGE_ASSET_PATTERN ]] || {
+      printf 'unexpected %s package for this architecture: %s\n' \
+        "$PACKAGE_DESCRIPTION" "$ASSET_NAME" >&2
       exit 1
     }
 
-    if [[ "$DEVELOP_BASE_URL" == http://* ]]; then
-      DEVELOP_BASE_URL="https://${DEVELOP_BASE_URL#http://}"
+    if [[ "$PACKAGE_BASE_URL" == http://* ]]; then
+      PACKAGE_BASE_URL="https://${PACKAGE_BASE_URL#http://}"
     fi
-    ASSET_URL="${DEVELOP_BASE_URL%/}/$ASSET_NAME"
+    ASSET_URL="${PACKAGE_BASE_URL%/}/$ASSET_NAME"
     ASSET_DIGEST=""
     TARGET_TAG="${ASSET_NAME%.tar.gz}"
-    TARGET_LABEL="develop package $ASSET_NAME"
+    TARGET_LABEL="$PACKAGE_DESCRIPTION package $ASSET_NAME"
     ;;
   *)
-    printf 'unsupported Fiber package source: %s (expected release or develop)\n' \
+    printf 'unsupported Fiber package source: %s (expected release, develop, or pr)\n' \
       "$FNN_SOURCE" >&2
     exit 1
     ;;

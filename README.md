@@ -114,17 +114,19 @@ write("cch");
 
 - 定时任务和手动任务默认从 `nervosnetwork/fiber` 选择发布时间最新的 release，
   包括 prerelease。
-- 手动触发参数 `fiber_source` 可选择 `release` 或 `develop`。`release` 表示
-  GitHub Releases 列表中发布时间最新的发布包；选择 `develop` 时，脚本会读取
-  `https://github-test-logs.ckbapp.dev/fiber/fnn.conf` 中的
-  `TARBALL_develop`，下载每日 `all.yml` 最新上传的 develop 包。
-- release 包会校验 GitHub 提供的 SHA-256；develop 包通过 HTTPS 下载并记录
-  SHA-256，但上游未提供摘要，因此无法做外部摘要比对。
+- 手动触发参数 `fiber_source` 可选择 `release`、`develop` 或 `pr`。`release`
+  表示 GitHub Releases 列表中发布时间最新的发布包；`develop` 会读取
+  `https://github-test-logs.ckbapp.dev/fiber/fnn.conf` 中的 `TARBALL_develop`。
+  选择 `pr` 时还需填写 `fiber_pr_number`，例如 `1607`，脚本会读取
+  `TARBALL_pr1607` 并校验下载包确实属于该 PR。
+- release 包会校验 GitHub 提供的 SHA-256；develop 和 PR 包通过 HTTPS 下载并
+  记录 SHA-256，但上游未提供摘要，因此无法做外部摘要比对。
 - `fnn` 版本无变化时不重启；只有 `fnn-cli` 落后时直接更新 CLI，不扫描数据库。
 - `fnn` 有新版本时先停止 `fiber-testnet1.service` 和 `fiber-testnet2.service`。
 - 使用新 `fnn --check-validate` 并行检查两个节点的数据库。只有确认不需要迁移时，
   才备份并替换两个节点的 `fnn`，同时更新 node1 的 `fnn-cli`。
-- 当前 develop 包不包含 `fnn-cli`，选择 `develop` 时会保留 node1 已安装的 CLI。
+- 当前 develop 和 PR 包不包含 `fnn-cli`，选择这两类包时会保留 node1 已安装的
+  CLI。
 - 启动服务并等待两个 RPC 返回版本、commit 和 pubkey，成功后才运行 smoke。
 - 启动或健康检查失败时恢复旧二进制并重新启动服务。
 

@@ -16,6 +16,8 @@ CWBTC_SCRIPT = {
     "args": "0x9a1086531ed6dc69e0bd44cef5278e03faf3015b31aff60b08fb87663ce8507100000000",
 }
 DAILY_SMOKE_AMOUNT_SATS = 100
+CCH_STARTUP_RETRY_DELAY_SECONDS = 1.0
+CCH_STARTUP_RETRY_MAX_DELAY_SECONDS = 8.0
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("CCH_SMOKE_ENABLED") != "1",
@@ -117,6 +119,65 @@ def fnn(config, rpc_url, args, timeout=None):
     return parse_json(run_cmd(cmd, timeout or config.command_timeout))
 
 
+def cch_initialization_retry_reason(exc, method):
+    """Describe a startup-time CCH error that is safe to retry unchanged."""
+
+    message = str(exc).lower()
+    if "cch startup recovery is still initializing" in message:
+        return "startup recovery in progress"
+    if "rpc error (code -32000): timeout" in message:
+        return "legacy actor RPC timeout"
+    if (
+        method == "receive_btc"
+        and "receive_btc order creation" in message
+        and "already being recovered" in message
+    ):
+        return "receive_btc order creation is already being recovered"
+    return None
+
+
+def is_retryable_cch_initialization_error(exc, method):
+    """Return whether the same startup-time CCH request can be retried safely."""
+
+    return cch_initialization_retry_reason(exc, method) is not None
+
+
+def call_cch_mutation_after_startup(config, args):
+    """Retry one exact CCH mutation while startup recovery becomes ready.
+
+    PR #1607 returns an explicit initialization error. v0.9.0-rc7 can instead
+    hit the legacy one-second actor RPC timeout; its closed-port and durable
+    creation guards make retrying the unchanged request safe.
+    """
+
+    method = args[1]
+    deadline = time.monotonic() + config.wait_timeout
+    retry_delay = CCH_STARTUP_RETRY_DELAY_SECONDS
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return fnn(config, config.f1_rpc, args)
+        except AssertionError as exc:
+            retry_reason = cch_initialization_retry_reason(exc, method)
+            if retry_reason is None:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            sleep_seconds = min(retry_delay, remaining)
+            print(
+                f"CCH {method} retryable startup state after attempt {attempt}: "
+                f"{retry_reason}; "
+                f"retrying in {sleep_seconds:.1f}s"
+            )
+            time.sleep(sleep_seconds)
+            retry_delay = min(
+                retry_delay * 2,
+                CCH_STARTUP_RETRY_MAX_DELAY_SECONDS,
+            )
+
+
 def lncli_prefix(config, node_name):
     env_name = f"CCH_SMOKE_{node_name.upper().replace('-', '_')}_LNCLI_PREFIX"
     if os.environ.get(env_name):
@@ -153,6 +214,22 @@ def hex_to_int(value):
     if isinstance(value, int):
         return value
     return int(value, 16) if str(value).startswith("0x") else int(value)
+
+
+def receive_btc_amounts(reported_amount_sats, principal_sats, fee_sats, fiber_source):
+    lightning_amount_sats = principal_sats + fee_sats
+    expected_reported_amounts = (
+        {lightning_amount_sats}
+        if fiber_source in {"develop", "pr"}
+        else {principal_sats, lightning_amount_sats}
+    )
+    if reported_amount_sats not in expected_reported_amounts:
+        raise AssertionError(
+            "unexpected receive_btc amount: "
+            f"{reported_amount_sats}; expected one of "
+            f"{sorted(expected_reported_amounts)}"
+        )
+    return principal_sats, lightning_amount_sats
 
 
 def same_script(left, right):
@@ -539,9 +616,8 @@ def test_cch_daily_smoke_bidirectional():
         amount_sats,
         f"cch-smoke-fiber-to-lnd-{int(time.time())}",
     )
-    send_order = fnn(
+    send_order = call_cch_mutation_after_startup(
         config,
-        config.f1_rpc,
         [
             "cch",
             "send_btc",
@@ -625,17 +701,20 @@ def test_cch_daily_smoke_bidirectional():
 
     # lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2
     fiber_invoice, receive_payment_hash = create_fiber_invoice(config, amount_sats)
-    receive_order = fnn(
+    receive_order = call_cch_mutation_after_startup(
         config,
-        config.f1_rpc,
         ["cch", "receive_btc", "--fiber-pay-req", fiber_invoice],
     )
     assert receive_order["payment_hash"] == receive_payment_hash
     assert same_script(receive_order["wrapped_btc_type_script"], config.udt_script)
     receive_fee_sats = hex_to_int(receive_order["fee_sats"])
-    receive_fiber_amount = hex_to_int(receive_order["amount_sats"])
-    assert receive_fiber_amount == amount_sats
-    lightning_amount = receive_fiber_amount + receive_fee_sats
+    receive_reported_amount = hex_to_int(receive_order["amount_sats"])
+    receive_fiber_amount, lightning_amount = receive_btc_amounts(
+        receive_reported_amount,
+        amount_sats,
+        receive_fee_sats,
+        os.environ.get("CCH_SMOKE_FNN_SOURCE", "release"),
+    )
 
     fiber_before = fiber_balances_from_f2_view(config, fiber_channel_id)
     lnd_before = lnd_channel_balances_from_a(config)

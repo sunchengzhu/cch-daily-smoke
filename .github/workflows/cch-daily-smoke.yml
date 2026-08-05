@@ -13,6 +13,12 @@ on:
         options:
           - release
           - develop
+          - pr
+      fiber_pr_number:
+        description: "Fiber PR number; required when source is pr"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -24,6 +30,7 @@ jobs:
     env:
       CCH_SMOKE_ENABLED: "1"
       CCH_SMOKE_FNN_SOURCE: ${{ inputs.fiber_source || 'release' }}
+      CCH_SMOKE_FNN_PR_NUMBER: ${{ inputs.fiber_pr_number || '' }}
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
       CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
       CCH_SMOKE_F2_RPC: http://127.0.0.1:8229

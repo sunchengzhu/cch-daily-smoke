@@ -3,6 +3,20 @@ name: cch stability
 on:
   workflow_dispatch:
     inputs:
+      fiber_source:
+        description: "Fiber package source"
+        required: false
+        default: release
+        type: choice
+        options:
+          - release
+          - develop
+          - pr
+      fiber_pr_number:
+        description: "Fiber PR number; required when source is pr"
+        required: false
+        default: ""
+        type: string
       flow:
         description: "选择一个完整业务 Flow；两个方向请分别运行"
         required: true
@@ -63,6 +77,8 @@ jobs:
     timeout-minutes: 390
     env:
       CCH_SMOKE_ENABLED: "1"
+      CCH_SMOKE_FNN_SOURCE: ${{ inputs.fiber_source || 'release' }}
+      CCH_SMOKE_FNN_PR_NUMBER: ${{ inputs.fiber_pr_number || '' }}
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
       CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
       CCH_SMOKE_F2_RPC: http://127.0.0.1:8229
