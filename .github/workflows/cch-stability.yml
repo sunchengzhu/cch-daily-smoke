@@ -120,7 +120,13 @@ jobs:
         if: ${{ inputs.flow == 'lnd-to-fiber' }}
         env:
           CCH_SMOKE_LND_MIN_SPENDABLE_SATS: "1000000"
-        run: python scripts/ensure_lnd_liquidity.py
+        run: |
+          python scripts/ensure_lnd_liquidity.py \
+            --load-mode "${{ inputs.load_mode }}" \
+            --tps "${{ inputs.tps }}" \
+            --duration-seconds "${{ inputs.duration_seconds }}" \
+            --amount-sats "${{ inputs.amount_sats }}" \
+            --max-inflight "${{ inputs.max_inflight }}"
 
       - name: Run end-to-end readiness probe
         run: |
