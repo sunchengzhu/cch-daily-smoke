@@ -1,8 +1,6 @@
 import csv
 import json
 
-import pytest
-
 from scripts.build_stability_artifacts import build_artifacts
 
 

@@ -167,9 +167,11 @@ def create_or_recover_receive_btc_order(
     fiber_invoice: str,
     payment_hash: str,
 ) -> tuple[dict[str, Any], int, bool, list[str]]:
-    """Retry only ambiguous receive_btc failures with the same Fiber invoice."""
+    """Retry recoverable receive_btc failures (actor RPC timeout, startup
+    recovery, order recovery, or ambiguous) with the same Fiber invoice."""
 
-    deadline = time.monotonic() + float(getattr(config, "wait_timeout", 180))
+    started = time.monotonic()
+    deadline = started + float(getattr(config, "wait_timeout", 180))
     recovery_reasons: list[str] = []
     attempt = 0
     retry_delay = RECEIVE_BTC_RETRY_DELAY_SECONDS
@@ -196,11 +198,12 @@ def create_or_recover_receive_btc_order(
             now = time.monotonic()
             if now >= deadline:
                 raise
-            LOG.warning(
-                "RECEIVE_BTC recovery hash=%s reason=%s attempt=%d %s: %s",
+            LOG.info(
+                "RECEIVE_BTC recovery hash=%s reason=%s attempt=%d elapsed=%.1fs %s: %s",
                 payment_hash,
                 reason,
                 attempt,
+                now - started,
                 type(exc).__name__,
                 compact_error(exc),
             )

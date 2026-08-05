@@ -202,14 +202,6 @@ def summary_markdown(summary: dict[str, Any]) -> str:
             summary.get("recovered_actor_rpc_timeouts", 0),
         ),
         (
-            "Required receive_btc actor RPC timeout recoveries",
-            summary.get("min_actor_rpc_timeout_recoveries", 0),
-        ),
-        (
-            "Actor RPC timeout coverage met",
-            summary.get("actor_rpc_timeout_coverage_met", True),
-        ),
-        (
             "receive_btc recovery reasons",
             ", ".join(
                 f"{name}: {count}"
