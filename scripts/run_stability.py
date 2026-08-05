@@ -50,6 +50,8 @@ FLOW_FIBER_TO_LND = "fiber-to-lnd"
 FLOW_LND_TO_FIBER = "lnd-to-fiber"
 MODE_FIXED_TPS = "fixed-tps"
 MODE_SEQUENTIAL = "sequential"
+RECEIVE_BTC_RETRY_DELAY_SECONDS = 1.0
+RECEIVE_BTC_RETRY_MAX_DELAY_SECONDS = 8.0
 StageCallback = Callable[[str, str, dict[str, Any]], None]
 
 
@@ -125,6 +127,66 @@ def run_flow_stage(
     return result
 
 
+def is_recoverable_receive_btc_error(exc: BaseException) -> bool:
+    """Return whether retrying the exact receive_btc request is safe and useful."""
+
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return True
+    message = compact_error(exc).lower()
+    return (
+        "cch startup recovery is still initializing" in message
+        or ("rpc error" in message and "timeout" in message)
+        or (
+            "receive_btc order creation" in message
+            and "already being recovered" in message
+        )
+    )
+
+
+def is_receive_btc_actor_rpc_timeout(exc: BaseException) -> bool:
+    """Return whether Fiber's one-second actor RPC timeout was observed."""
+
+    return "rpc error (code -32000): timeout" in compact_error(exc).lower()
+
+
+def create_or_recover_receive_btc_order(
+    config: CchSmokeConfig,
+    fiber_invoice: str,
+    payment_hash: str,
+) -> tuple[dict[str, Any], int, bool]:
+    """Retry only ambiguous receive_btc failures with the same Fiber invoice."""
+
+    deadline = time.monotonic() + float(getattr(config, "wait_timeout", 180))
+    actor_rpc_timeout_seen = False
+    attempt = 0
+    retry_delay = RECEIVE_BTC_RETRY_DELAY_SECONDS
+    while True:
+        attempt += 1
+        try:
+            order = fnn(
+                config,
+                config.f1_rpc,
+                ["cch", "receive_btc", "--fiber-pay-req", fiber_invoice],
+            )
+            return order, attempt, actor_rpc_timeout_seen
+        except BaseException as exc:
+            if not is_recoverable_receive_btc_error(exc):
+                raise
+            actor_rpc_timeout_seen |= is_receive_btc_actor_rpc_timeout(exc)
+            now = time.monotonic()
+            if now >= deadline:
+                raise
+            LOG.warning(
+                "RECEIVE_BTC recovery hash=%s attempt=%d %s: %s",
+                payment_hash,
+                attempt,
+                type(exc).__name__,
+                compact_error(exc),
+            )
+            time.sleep(min(retry_delay, deadline - now))
+            retry_delay = min(retry_delay * 2, RECEIVE_BTC_RETRY_MAX_DELAY_SECONDS)
+
+
 class JsonlWriter:
     def __init__(self, path: Path):
         self.path = path
@@ -148,6 +210,8 @@ class RunState:
     started: int = 0
     running: int = 0
     succeeded: int = 0
+    recovered_receive_btc: int = 0
+    recovered_actor_rpc_timeouts: int = 0
     failed: int = 0
     rejected: int = 0
     latencies_ms: list[float] = field(default_factory=list)
@@ -162,6 +226,8 @@ class RunState:
                 "started": self.started,
                 "running": self.running,
                 "succeeded": self.succeeded,
+                "recovered_receive_btc": self.recovered_receive_btc,
+                "recovered_actor_rpc_timeouts": self.recovered_actor_rpc_timeouts,
                 "failed": self.failed,
                 "rejected": self.rejected,
                 "latency_p95_ms": percentile(self.latencies_ms, 95),
@@ -262,29 +328,67 @@ def run_flow_lnd_to_fiber(
         lambda: create_fiber_invoice(config, amount_sats),
         lambda value: {"payment_hash": value[1]},
     )
-    order = run_flow_stage(
-        stage_callback,
-        "create_cch_order",
-        lambda: fnn(
-            config,
-            config.f1_rpc,
-            ["cch", "receive_btc", "--fiber-pay-req", fiber_invoice],
-        ),
-    )
-    if order["payment_hash"] != payment_hash:
-        raise AssertionError("receive_btc returned a different payment hash")
-    if not same_script(order["wrapped_btc_type_script"], config.udt_script):
-        raise AssertionError("receive_btc returned an unexpected wrapped BTC type script")
-
-    fee_sats = hex_to_int(order["fee_sats"])
-    fiber_amount = hex_to_int(order["amount_sats"])
-    if fiber_amount != amount_sats:
-        raise AssertionError(
-            f"unexpected Fiber amount: {fiber_amount}; expected {amount_sats}"
-        )
-    lightning_amount = fiber_amount + fee_sats
-
+    order = None
     try:
+        order, receive_btc_attempts, actor_rpc_timeout_seen = run_flow_stage(
+            stage_callback,
+            "create_cch_order",
+            lambda: create_or_recover_receive_btc_order(
+                config, fiber_invoice, payment_hash
+            ),
+            lambda value: {
+                "payment_hash": value[0].get("payment_hash"),
+                "receive_btc_attempts": value[1],
+                "receive_btc_recovered": value[1] > 1,
+                "actor_rpc_timeout_recovered": value[2],
+            },
+        )
+        if order["payment_hash"] != payment_hash:
+            raise AssertionError("receive_btc returned a different payment hash")
+        if order["outgoing_pay_req"] != fiber_invoice:
+            raise AssertionError("receive_btc returned a different Fiber invoice")
+        if not same_script(order["wrapped_btc_type_script"], config.udt_script):
+            raise AssertionError(
+                "receive_btc returned an unexpected wrapped BTC type script"
+            )
+
+        fee_sats = hex_to_int(order["fee_sats"])
+        reported_amount = hex_to_int(order["amount_sats"])
+        lightning_amount = amount_sats + fee_sats
+        fiber_source = os.environ.get("CCH_SMOKE_FNN_SOURCE", "release")
+        expected_reported_amounts = (
+            {lightning_amount}
+            if fiber_source in {"develop", "pr"}
+            else {amount_sats, lightning_amount}
+        )
+        if reported_amount not in expected_reported_amounts:
+            raise AssertionError(
+                "unexpected receive_btc amount: "
+                f"{reported_amount}; expected one of {sorted(expected_reported_amounts)}"
+            )
+
+        if receive_btc_attempts > 1:
+            if order["status"] != "Pending":
+                raise AssertionError(
+                    "recovered receive_btc order should remain Pending before payment"
+                )
+            lnd_invoice = lncli_json(
+                config,
+                "lnd-a",
+                ["lookupinvoice", payment_hash.removeprefix("0x")],
+            )
+            if (
+                lnd_invoice.get("payment_request")
+                != order["incoming_invoice"]["Lightning"]
+            ):
+                raise AssertionError(
+                    "recovered receive_btc returned a different Lightning invoice"
+                )
+            if lnd_invoice.get("state") != "OPEN":
+                raise AssertionError("recovered LND invoice should remain OPEN before payment")
+            if int(lnd_invoice["value"]) != lightning_amount:
+                raise AssertionError("recovered LND invoice has an unexpected amount")
+
         run_flow_stage(
             stage_callback,
             "pay_lnd_invoice",
@@ -313,21 +417,25 @@ def run_flow_lnd_to_fiber(
             ),
         )
     except BaseException:
-        if stage_callback:
-            stage_callback("cleanup_lnd_invoice", "START", {})
-        cleanup = cleanup_lnd_to_fiber_invoice(config, payment_hash)
-        if stage_callback:
-            stage_callback(
-                "cleanup_lnd_invoice",
-                cleanup.get("result", "FAIL"),
-                cleanup,
-            )
+        if order is not None:
+            if stage_callback:
+                stage_callback("cleanup_lnd_invoice", "START", {})
+            cleanup = cleanup_lnd_to_fiber_invoice(config, payment_hash)
+            if stage_callback:
+                stage_callback(
+                    "cleanup_lnd_invoice",
+                    cleanup.get("result", "FAIL"),
+                    cleanup,
+                )
         raise
     return {
         "payment_hash": payment_hash,
         "fee_sats": fee_sats,
         "source_amount": lightning_amount,
-        "destination_amount": fiber_amount,
+        "destination_amount": amount_sats,
+        "receive_btc_attempts": receive_btc_attempts,
+        "receive_btc_recovered": receive_btc_attempts > 1,
+        "actor_rpc_timeout_recovered": actor_rpc_timeout_seen,
     }
 
 
@@ -421,7 +529,7 @@ def execute_transaction(
     state: RunState,
     writer: JsonlWriter,
     limiter: threading.Semaphore,
-    flow_fn: Callable[[CchSmokeConfig, int, str], dict[str, Any]],
+    flow_fn: Callable[..., dict[str, Any]],
 ) -> None:
     started_at = time.monotonic()
     start_delay_ms = max(0.0, (started_at - scheduled_at) * 1000)
@@ -439,13 +547,34 @@ def execute_transaction(
         "start_delay_ms": round(start_delay_ms, 3),
         "amount_sats": amount_sats,
     }
+    recovery_details: dict[str, Any] = {}
+
+    def capture_stage(stage: str, status: str, details: dict[str, Any]) -> None:
+        if stage == "create_cch_order" and status == "PASS":
+            for key in (
+                "receive_btc_attempts",
+                "receive_btc_recovered",
+                "actor_rpc_timeout_recovered",
+            ):
+                if key in details:
+                    recovery_details[key] = details[key]
+
     try:
-        result = flow_fn(config, amount_sats, f"cch-stability-{run_id}-{sequence}")
+        result = flow_fn(
+            config,
+            amount_sats,
+            f"cch-stability-{run_id}-{sequence}",
+            stage_callback=capture_stage,
+        )
         latency_ms = (time.monotonic() - started_at) * 1000
         record.update(result)
         record.update(status="success", latency_ms=round(latency_ms, 3))
         with state.lock:
             state.succeeded += 1
+            if result.get("receive_btc_recovered"):
+                state.recovered_receive_btc += 1
+            if result.get("actor_rpc_timeout_recovered"):
+                state.recovered_actor_rpc_timeouts += 1
             state.latencies_ms.append(latency_ms)
         LOG.debug(
             "TX success seq=%d hash=%s latency_ms=%.1f",
@@ -456,6 +585,7 @@ def execute_transaction(
     except BaseException as exc:  # pytest.fail derives from BaseException
         latency_ms = (time.monotonic() - started_at) * 1000
         error_type = type(exc).__name__
+        record.update(recovery_details)
         record.update(
             status="failed",
             latency_ms=round(latency_ms, 3),
@@ -465,6 +595,10 @@ def execute_transaction(
         )
         with state.lock:
             state.failed += 1
+            if recovery_details.get("receive_btc_recovered"):
+                state.recovered_receive_btc += 1
+            if recovery_details.get("actor_rpc_timeout_recovered"):
+                state.recovered_actor_rpc_timeouts += 1
             state.errors[error_type] = state.errors.get(error_type, 0) + 1
         LOG.error(
             "FAILED seq=%d latency=%.2fs %s: %s",
@@ -493,12 +627,19 @@ def build_summary(
     with state.lock:
         total_unsuccessful = state.failed + state.rejected
         failure_rate = total_unsuccessful / state.scheduled if state.scheduled else 1.0
+        min_actor_rpc_timeout_recoveries = getattr(
+            args, "min_actor_rpc_timeout_recoveries", 0
+        )
+        actor_rpc_timeout_coverage_met = (
+            state.recovered_actor_rpc_timeouts >= min_actor_rpc_timeout_recoveries
+        )
         load_seconds = max(load_finished_at - load_started_at, 0.000001)
         wall_seconds = max(finished_at - load_started_at, 0.000001)
         return {
             "type": "summary",
             "run_id": run_id,
             "flow": args.flow,
+            "fiber_source": os.environ.get("CCH_SMOKE_FNN_SOURCE", "unspecified"),
             "load_mode": mode,
             "target_tps": args.tps if mode == MODE_FIXED_TPS else None,
             "target_transactions": (
@@ -513,6 +654,10 @@ def build_summary(
             "scheduled": state.scheduled,
             "started": state.started,
             "succeeded": state.succeeded,
+            "recovered_receive_btc": state.recovered_receive_btc,
+            "recovered_actor_rpc_timeouts": state.recovered_actor_rpc_timeouts,
+            "min_actor_rpc_timeout_recoveries": min_actor_rpc_timeout_recoveries,
+            "actor_rpc_timeout_coverage_met": actor_rpc_timeout_coverage_met,
             "failed": state.failed,
             "rejected": state.rejected,
             "failure_rate": round(failure_rate, 6),
@@ -540,7 +685,10 @@ def build_summary(
                 else None,
             },
             "errors": dict(sorted(state.errors.items())),
-            "passed": failure_rate <= args.max_failure_rate,
+            "passed": (
+                failure_rate <= args.max_failure_rate
+                and actor_rpc_timeout_coverage_met
+            ),
             "max_failure_rate": args.max_failure_rate,
             "finished_at": utc_now(),
         }
@@ -560,13 +708,17 @@ def finish_load(
     )
     writer.write(summary)
     LOG.info(
-        "RESULT %s mode=%s succeeded=%d/%d failed=%d rejected=%d "
+        "RESULT %s mode=%s succeeded=%d/%d recovered_receive_btc=%d "
+        "recovered_actor_rpc_timeouts=%d "
+        "failed=%d rejected=%d "
         "failure_rate=%.3f%% success_tps=%.2f success_p50=%s "
         "success_p95=%s wall=%.1fs errors=%s",
         "PASS" if summary["passed"] else "FAIL",
         summary["load_mode"],
         summary["succeeded"],
         summary["scheduled"],
+        summary["recovered_receive_btc"],
+        summary["recovered_actor_rpc_timeouts"],
         summary["failed"],
         summary["rejected"],
         summary["failure_rate"] * 100,
@@ -583,7 +735,7 @@ def run_sequential_load(
     args: argparse.Namespace,
     config: CchSmokeConfig,
     writer: JsonlWriter,
-    flow_fn: Callable[[CchSmokeConfig, int, str], dict[str, Any]],
+    flow_fn: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     state = RunState()
     limiter = threading.BoundedSemaphore(1)
@@ -610,6 +762,7 @@ def run_sequential_load(
         elapsed = now - load_started_at
         LOG.info(
             "PROGRESS %ds mode=%s sent=%d done=%d active=%d failed=%d "
+            "recovered_receive_btc=%d recovered_actor_rpc_timeouts=%d "
             "success_tps=%.2f success_p95=%s",
             round(elapsed),
             MODE_SEQUENTIAL,
@@ -617,6 +770,8 @@ def run_sequential_load(
             completed,
             snapshot["running"],
             snapshot["failed"],
+            snapshot["recovered_receive_btc"],
+            snapshot["recovered_actor_rpc_timeouts"],
             snapshot["succeeded"] / elapsed,
             seconds(snapshot["latency_p95_ms"]),
         )
@@ -668,7 +823,7 @@ def run_load(
     args: argparse.Namespace,
     config: CchSmokeConfig,
     writer: JsonlWriter,
-    flow_fn: Callable[[CchSmokeConfig, int, str], dict[str, Any]],
+    flow_fn: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     if getattr(args, "mode", MODE_FIXED_TPS) == MODE_SEQUENTIAL:
         return run_sequential_load(args, config, writer, flow_fn)
@@ -783,7 +938,9 @@ def run_load(
                 )
                 LOG.info(
                     "PROGRESS %ds sent=%d/%d done=%d active=%d failed=%d "
-                    "rejected=%d saturated=%s success_tps=%.2f success_p95=%s",
+                    "rejected=%d recovered_receive_btc=%d "
+                    "recovered_actor_rpc_timeouts=%d saturated=%s "
+                    "success_tps=%.2f success_p95=%s",
                     round(elapsed),
                     snapshot["scheduled"],
                     target_count,
@@ -791,6 +948,8 @@ def run_load(
                     snapshot["running"],
                     snapshot["failed"],
                     snapshot["rejected"],
+                    snapshot["recovered_receive_btc"],
+                    snapshot["recovered_actor_rpc_timeouts"],
                     saturation,
                     snapshot["succeeded"] / elapsed,
                     seconds(snapshot["latency_p95_ms"]),
@@ -836,6 +995,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-inflight", type=int, default=100)
     parser.add_argument("--progress-interval", type=float, default=10.0)
     parser.add_argument("--max-failure-rate", type=float, default=0.0)
+    parser.add_argument("--min-actor-rpc-timeout-recoveries", type=int, default=0)
     parser.add_argument("--output-dir", type=Path, default=Path("reports/stability"))
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
@@ -849,6 +1009,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--max-inflight must be greater than zero in fixed-tps mode")
     if not 0 <= args.max_failure_rate <= 1:
         parser.error("--max-failure-rate must be between 0 and 1")
+    if args.min_actor_rpc_timeout_recoveries < 0:
+        parser.error("--min-actor-rpc-timeout-recoveries must not be negative")
     if args.amount_sats is not None and args.amount_sats <= 0:
         parser.error("--amount-sats must be greater than zero")
     return args

@@ -58,8 +58,13 @@ on:
         required: true
         default: "0"
         type: string
+      min_actor_rpc_timeout_recoveries:
+        description: "至少观察并成功恢复多少笔 receive_btc actor RPC timeout；复现 #1564 时可填 1"
+        required: true
+        default: "0"
+        type: string
       update_fnn:
-        description: "测试前是否更新并验证 Fiber 节点"
+        description: "测试前是否更新并验证 Fiber 节点；选择 develop 或 pr 时会自动更新"
         required: true
         default: false
         type: boolean
@@ -93,7 +98,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Update and verify Fiber nodes
-        if: ${{ inputs.update_fnn }}
+        if: ${{ inputs.update_fnn || inputs.fiber_source == 'develop' || inputs.fiber_source == 'pr' }}
         run: scripts/update_fnn.sh
 
       - name: Set up Python 3.12
@@ -128,6 +133,7 @@ jobs:
             --amount-sats "${{ inputs.amount_sats }}" \
             --max-inflight "${{ inputs.max_inflight }}" \
             --max-failure-rate "${{ inputs.max_failure_rate }}" \
+            --min-actor-rpc-timeout-recoveries "${{ inputs.min_actor_rpc_timeout_recoveries }}" \
             --output-dir reports/stability
 
       - name: Build readable stability reports

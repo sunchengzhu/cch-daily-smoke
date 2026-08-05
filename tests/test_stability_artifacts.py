@@ -23,7 +23,18 @@ def transaction(sequence, status="success", latency_ms=2000, **extra):
 
 def test_interrupted_run_builds_partial_readable_reports(tmp_path):
     source = tmp_path / "fiber-to-lnd-run.jsonl"
-    write_jsonl(source, [transaction(1, latency_ms=1000), transaction(2, latency_ms=3000)])
+    write_jsonl(
+        source,
+        [
+            transaction(
+                1,
+                latency_ms=1000,
+                receive_btc_recovered=True,
+                actor_rpc_timeout_recovered=True,
+            ),
+            transaction(2, latency_ms=3000),
+        ],
+    )
 
     paths = build_artifacts(source, "fiber-to-lnd", 5, 300)
     summary = json.loads(paths["summary_json"].read_text(encoding="utf-8"))
@@ -33,9 +44,14 @@ def test_interrupted_run_builds_partial_readable_reports(tmp_path):
     assert summary["target_transactions"] == 1500
     assert summary["recorded_transactions"] == 2
     assert summary["succeeded"] == 2
+    assert summary["recovered_receive_btc"] == 1
+    assert summary["recovered_actor_rpc_timeouts"] == 1
     assert summary["latency_ms"]["p50"] == 2000
     assert "partial report" in paths["summary_md"].read_text(encoding="utf-8")
     assert "Successful flow latency p95 (ms)" in paths["summary_md"].read_text(
+        encoding="utf-8"
+    )
+    assert "| Recovered receive_btc flows | 1 |" in paths["summary_md"].read_text(
         encoding="utf-8"
     )
     assert "| Failure rate | 0.000% |" in paths["summary_md"].read_text(
