@@ -116,6 +116,12 @@ jobs:
             exit 1
           fi
 
+      - name: Ensure LND outbound liquidity
+        if: ${{ inputs.flow == 'lnd-to-fiber' }}
+        env:
+          CCH_SMOKE_LND_MIN_SPENDABLE_SATS: "1000000"
+        run: python scripts/ensure_lnd_liquidity.py
+
       - name: Run end-to-end readiness probe
         run: |
           python scripts/check_stability_readiness.py \
