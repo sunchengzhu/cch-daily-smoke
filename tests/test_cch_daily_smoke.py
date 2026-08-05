@@ -119,19 +119,27 @@ def fnn(config, rpc_url, args, timeout=None):
     return parse_json(run_cmd(cmd, timeout or config.command_timeout))
 
 
-def is_retryable_cch_initialization_error(exc, method):
-    """Return whether the same startup-time CCH request can be retried safely."""
+def cch_initialization_retry_reason(exc, method):
+    """Describe a startup-time CCH error that is safe to retry unchanged."""
 
     message = str(exc).lower()
     if "cch startup recovery is still initializing" in message:
-        return True
+        return "startup recovery in progress"
     if "rpc error (code -32000): timeout" in message:
-        return True
-    return (
+        return "legacy actor RPC timeout"
+    if (
         method == "receive_btc"
         and "receive_btc order creation" in message
         and "already being recovered" in message
-    )
+    ):
+        return "receive_btc order creation is already being recovered"
+    return None
+
+
+def is_retryable_cch_initialization_error(exc, method):
+    """Return whether the same startup-time CCH request can be retried safely."""
+
+    return cch_initialization_retry_reason(exc, method) is not None
 
 
 def call_cch_mutation_after_startup(config, args):
@@ -151,14 +159,16 @@ def call_cch_mutation_after_startup(config, args):
         try:
             return fnn(config, config.f1_rpc, args)
         except AssertionError as exc:
-            if not is_retryable_cch_initialization_error(exc, method):
+            retry_reason = cch_initialization_retry_reason(exc, method)
+            if retry_reason is None:
                 raise
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise
             sleep_seconds = min(retry_delay, remaining)
             print(
-                f"CCH {method} is not ready after attempt {attempt}; "
+                f"CCH {method} retryable startup state after attempt {attempt}: "
+                f"{retry_reason}; "
                 f"retrying in {sleep_seconds:.1f}s"
             )
             time.sleep(sleep_seconds)
@@ -210,7 +220,7 @@ def receive_btc_amounts(reported_amount_sats, principal_sats, fee_sats, fiber_so
     lightning_amount_sats = principal_sats + fee_sats
     expected_reported_amounts = (
         {lightning_amount_sats}
-        if fiber_source == "develop"
+        if fiber_source in {"develop", "pr"}
         else {principal_sats, lightning_amount_sats}
     )
     if reported_amount_sats not in expected_reported_amounts:

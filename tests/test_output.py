@@ -7,6 +7,7 @@ from test_cch_daily_smoke import (
     active_lnd_channel,
     assert_balance_delta,
     call_cch_mutation_after_startup,
+    cch_initialization_retry_reason,
     format_cwbtc,
     is_retryable_cch_initialization_error,
     print_asset_convention,
@@ -98,33 +99,48 @@ def test_receive_btc_develop_rejects_principal_only_amount():
         receive_btc_amounts(100, 100, 10, "develop")
 
 
+def test_receive_btc_pr_uses_develop_amount_semantics():
+    assert receive_btc_amounts(110, 100, 10, "pr") == (100, 110)
+    with pytest.raises(AssertionError, match="expected one of \\[110\\]"):
+        receive_btc_amounts(100, 100, 10, "pr")
+
+
 @pytest.mark.parametrize("reported_amount", [100, 110])
 def test_receive_btc_release_accepts_old_and_new_amount_semantics(reported_amount):
     assert receive_btc_amounts(reported_amount, 100, 10, "release") == (100, 110)
 
 
 @pytest.mark.parametrize(
-    ("method", "message"),
+    ("method", "message", "expected_reason"),
     [
-        ("send_btc", "Error: RPC error (code -32000): timeout"),
+        (
+            "send_btc",
+            "Error: RPC error (code -32000): timeout",
+            "legacy actor RPC timeout",
+        ),
         (
             "send_btc",
             "Error: RPC error (code -32000): "
             "CCH startup recovery is still initializing",
+            "startup recovery in progress",
         ),
         (
             "receive_btc",
             "receive_btc order creation for payment hash abc "
             "is already being recovered",
+            "receive_btc order creation is already being recovered",
         ),
     ],
 )
-def test_cch_initialization_errors_are_retryable(method, message):
-    assert is_retryable_cch_initialization_error(AssertionError(message), method)
+def test_cch_initialization_errors_are_retryable(method, message, expected_reason):
+    error = AssertionError(message)
+    assert cch_initialization_retry_reason(error, method) == expected_reason
+    assert is_retryable_cch_initialization_error(error, method)
 
 
 def test_permanent_cch_error_is_not_retryable():
     error = AssertionError("Error: RPC error (code -32000): invoice network mismatch")
+    assert cch_initialization_retry_reason(error, "send_btc") is None
     assert not is_retryable_cch_initialization_error(error, "send_btc")
 
 
