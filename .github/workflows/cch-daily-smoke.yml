@@ -23,6 +23,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: cch-daily-smoke-test-new-02
+  cancel-in-progress: false
+
 jobs:
   cch-daily-smoke:
     runs-on: [self-hosted, test-new-02]
@@ -40,13 +44,26 @@ jobs:
       CCH_SMOKE_LND_NETWORK: testnet4
       CCH_SMOKE_LND_MIN_SPENDABLE_SATS: "1000000"
       CCH_SMOKE_LND_TOPUP_SATS: "3000000"
-      CCH_SMOKE_FNN_AUTH_TOKEN: ${{ secrets.CCH_SMOKE_FNN_AUTH_TOKEN }}
+      CCH_FIBER_SWAP_SMOKE_ENABLED: "1"
+      CCH_FIBER_SWAP_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
+      CCH_FIBER_SWAP_F2_RPC: http://127.0.0.1:8229
+      CCH_FIBER_SWAP_AMOUNT_SATS: "100"
+      CCH_FIBER_SWAP_MAX_CCH_FEE_SATS: "100"
+      CCH_FIBER_SWAP_MAX_FIBER_FEE: "100"
+      CCH_FIBER_SWAP_LND_FEE_LIMIT_SATS: "10"
+      CCH_FIBER_SWAP_PAYMENT_TIMEOUT: "120"
+      CCH_FIBER_SWAP_API_BASE_URL: https://fiber-swap-api.retric.uk
+      CCH_FIBER_SWAP_LND_D_CONTAINER: lnd-d
+      CCH_FIBER_SWAP_LND_DIR: /data/.lnd
+      CCH_FIBER_SWAP_LND_NETWORK: testnet
+      CCH_FIBER_SWAP_LND_D_PUBKEY: 027431fbdbbc67df1ed0cf30568fe8ab04ef2fbff296ebcc0c826dc01e923799f5
+      CCH_FIBER_SWAP_LND_REMOTE_PUBKEY: 03c7796e27b079b25ea5c9f02dbb289ab1720248ecdd25dceed7cd489f2fe6290d
+      CCH_FIBER_SWAP_LND_CHANNEL_POINT: 70fdfd0dd7960b1b7ca1f562ae031b3a37925fa957eb97c97536f82ed5f37c35:1
+      CCH_FIBER_SWAP_BOTTLE_PUBKEY: 02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71
+      CCH_FIBER_SWAP_FIBER_CHANNEL_ID: "0x4b6513e2d1ad8341366d3b0733f00306aee7e2db21e669a30aba5d33a1ed5536"
 
     steps:
       - uses: actions/checkout@v7
-
-      - name: Update and verify Fiber nodes
-        run: scripts/update_fnn.sh
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
@@ -57,19 +74,63 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
       - name: Run unit tests
-        run: python -m pytest -q --ignore=tests/test_cch_daily_smoke.py
+        run: |
+          python -m pytest -q \
+            --ignore=tests/test_cch_daily_smoke.py \
+            --ignore=tests/test_fiber_swap_daily_smoke.py
+
+      - name: Prepare FNN auth file
+        env:
+          FNN_AUTH_TOKEN: ${{ secrets.CCH_SMOKE_FNN_AUTH_TOKEN }}
+        run: |
+          FNN_AUTH_TOKEN_VALUE="${FNN_AUTH_TOKEN:-}"
+          unset FNN_AUTH_TOKEN
+          if [ -z "$FNN_AUTH_TOKEN_VALUE" ]; then
+            echo "::error::Missing repository secret CCH_SMOKE_FNN_AUTH_TOKEN."
+            exit 1
+          fi
+
+          FNN_AUTH_FILE="$(mktemp "${RUNNER_TEMP}/cch-fnn-auth.XXXXXX")"
+          cleanup_failed_prepare() {
+            rm -f -- "$FNN_AUTH_FILE"
+          }
+          trap cleanup_failed_prepare EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          chmod 600 "$FNN_AUTH_FILE"
+          printf '%s' "$FNN_AUTH_TOKEN_VALUE" > "$FNN_AUTH_FILE"
+          unset FNN_AUTH_TOKEN_VALUE
+          {
+            printf 'CCH_SMOKE_FNN_AUTH_TOKEN_FILE=%s\n' "$FNN_AUTH_FILE"
+            printf 'CCH_FIBER_SWAP_FNN_AUTH_TOKEN_FILE=%s\n' "$FNN_AUTH_FILE"
+            printf 'CCH_FNN_AUTH_TEMP_FILE=%s\n' "$FNN_AUTH_FILE"
+          } >> "$GITHUB_ENV"
+          trap - EXIT HUP INT TERM
+
+      - name: Update and verify Fiber nodes
+        run: scripts/update_fnn.sh
 
       - name: Ensure LND outbound liquidity
         run: python scripts/ensure_lnd_liquidity.py
 
-      - name: Run live bidirectional CCH smoke
+      - name: Run local CCH smoke
         run: |
-          if [ -z "${CCH_SMOKE_FNN_AUTH_TOKEN:-}" ]; then
-            echo "::error::Missing repository secret CCH_SMOKE_FNN_AUTH_TOKEN."
-            exit 1
-          fi
-          python -m pytest -vv -s \
+          python -m pytest -q -s --no-header \
             tests/test_cch_daily_smoke.py::test_cch_daily_smoke_bidirectional
+
+      - name: Run FiberSwap CCH smoke (direct Lightning channel)
+        run: |
+          python -m pytest -q -s --no-header \
+            tests/test_fiber_swap_daily_smoke.py::test_fiber_swap_bidirectional
+
+      - name: Remove FNN auth file
+        if: ${{ always() }}
+        run: |
+          if [ -n "${CCH_FNN_AUTH_TEMP_FILE:-}" ]; then
+            rm -f -- "$CCH_FNN_AUTH_TEMP_FILE"
+          fi
 
   notify-discord:
     runs-on: ubuntu-22.04

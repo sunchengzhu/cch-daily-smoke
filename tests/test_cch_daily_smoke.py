@@ -4,7 +4,9 @@ import json
 import os
 import shlex
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +20,10 @@ CWBTC_SCRIPT = {
 DAILY_SMOKE_AMOUNT_SATS = 100
 CCH_STARTUP_RETRY_DELAY_SECONDS = 1.0
 CCH_STARTUP_RETRY_MAX_DELAY_SECONDS = 8.0
+RAW_FNN_AUTH_ENV_VARS = (
+    "CCH_SMOKE_FNN_AUTH_TOKEN",
+    "CCH_FIBER_SWAP_FNN_AUTH_TOKEN",
+)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("CCH_SMOKE_ENABLED") != "1",
@@ -81,17 +87,54 @@ class CchSmokeConfig:
 
 
 def run_cmd(args, timeout):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    safe_args = list(args)
+    sensitive_values = [
+        value
+        for name in RAW_FNN_AUTH_ENV_VARS
+        if (value := os.environ.get(name))
+    ]
+    if "--auth-token" in safe_args:
+        token_index = safe_args.index("--auth-token") + 1
+        if token_index < len(safe_args):
+            sensitive_values.append(str(safe_args[token_index]))
+            safe_args[token_index] = "***"
+
+    # A manual raw-token fallback is converted to an auth file before this
+    # call. Do not also leak the original value into the child environment.
+    child_env = os.environ.copy()
+    for name in RAW_FNN_AUTH_ENV_VARS:
+        child_env.pop(name, None)
+
+    command = " ".join(shlex.quote(str(a)) for a in safe_args)
+
+    def redact(value):
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            value = value.decode(errors="replace")
+        value = str(value)
+        for secret in sensitive_values:
+            value = value.replace(secret, "***")
+        return value
+
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=child_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            f"command timed out after {timeout}s: {command}\n"
+            f"stdout:\n{redact(exc.stdout)}\nstderr:\n{redact(exc.stderr)}"
+        ) from None
+
     if result.returncode != 0:
-        safe_args = list(args)
-        if "--auth-token" in safe_args:
-            token_index = safe_args.index("--auth-token") + 1
-            if token_index < len(safe_args):
-                safe_args[token_index] = "***"
-        command = " ".join(shlex.quote(str(a)) for a in safe_args)
         raise AssertionError(
             f"command failed ({result.returncode}): {command}\n"
-            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            f"stdout:\n{redact(result.stdout)}\nstderr:\n{redact(result.stderr)}"
         )
     return result.stdout.strip()
 
@@ -109,14 +152,46 @@ def parse_json(output):
         return json.loads(output[min(starts) :])
 
 
+@contextmanager
+def fnn_auth_args(token_file_env, *token_envs):
+    """Yield file-based fnn-cli auth arguments without putting a token in argv."""
+
+    token_file = os.environ.get(token_file_env)
+    if token_file:
+        yield ["--auth-token-file", token_file]
+        return
+
+    token = next(
+        (os.environ.get(name) for name in token_envs if os.environ.get(name)),
+        None,
+    )
+    if not token:
+        yield []
+        return
+
+    # Manual runs may still provide the token as an environment variable. Keep
+    # the subprocess argv safe in that case, and always remove the temporary
+    # credential file when the command returns or raises.
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="cch-fnn-auth-",
+        dir=os.environ.get("RUNNER_TEMP") or None,
+    ) as auth_file:
+        os.fchmod(auth_file.fileno(), 0o600)
+        auth_file.write(token)
+        auth_file.flush()
+        yield ["--auth-token-file", auth_file.name]
+
+
 def fnn(config, rpc_url, args, timeout=None):
-    cmd = [config.fnn_cli, "-u", rpc_url, "-o", "json", "--no-banner"]
-    if os.environ.get("CCH_SMOKE_FNN_AUTH_TOKEN"):
-        cmd.extend(["--auth-token", os.environ["CCH_SMOKE_FNN_AUTH_TOKEN"]])
-    if os.environ.get("CCH_SMOKE_FNN_AUTH_TOKEN_FILE"):
-        cmd.extend(["--auth-token-file", os.environ["CCH_SMOKE_FNN_AUTH_TOKEN_FILE"]])
-    cmd.extend(args)
-    return parse_json(run_cmd(cmd, timeout or config.command_timeout))
+    base_cmd = [config.fnn_cli, "-u", rpc_url, "-o", "json", "--no-banner"]
+    with fnn_auth_args(
+        "CCH_SMOKE_FNN_AUTH_TOKEN_FILE",
+        "CCH_SMOKE_FNN_AUTH_TOKEN",
+    ) as auth_args:
+        cmd = base_cmd + auth_args + args
+        return parse_json(run_cmd(cmd, timeout or config.command_timeout))
 
 
 def cch_initialization_retry_reason(exc, method):
@@ -270,11 +345,13 @@ def wait_cch_order_status(config, payment_hash, expected):
     )
 
 
-def wait_fiber_payment_status(config, payment_hash, expected):
+def wait_fiber_payment_status(config, payment_hash, expected, rpc_url=None):
+    payment_rpc = rpc_url or config.f2_rpc
+
     def check():
         payment = fnn(
             config,
-            config.f2_rpc,
+            payment_rpc,
             ["payment", "get_payment", "--payment-hash", payment_hash],
         )
         return payment if payment.get("status") == expected else None
@@ -316,6 +393,37 @@ def wait_lnd_invoice_settled(config, node_name, payment_hash, expected_paid_sats
 
     return wait_until(
         f"{node_name} invoice {payment_hash} to settle for {expected_paid_sats} sats",
+        check,
+        config.wait_timeout,
+    )
+
+
+def wait_lnd_payment_succeeded(config, node_name, payment_hash):
+    hash_without_prefix = payment_hash.removeprefix("0x")
+
+    def check():
+        payments = lncli_json(
+            config,
+            node_name,
+            [
+                "listpayments",
+                "--include_incomplete",
+                "--max_payments=100",
+            ],
+        )
+        for payment in payments.get("payments", []):
+            if payment.get("payment_hash") != hash_without_prefix:
+                continue
+            if payment.get("status") == "FAILED":
+                pytest.fail(
+                    f"{node_name} payment {payment_hash} failed: "
+                    f"{payment.get('failure_reason')}"
+                )
+            return payment if payment.get("status") == "SUCCEEDED" else None
+        return None
+
+    return wait_until(
+        f"{node_name} payment {payment_hash} to succeed",
         check,
         config.wait_timeout,
     )
@@ -508,11 +616,20 @@ def assert_balance_delta(label, before, after, expected_delta, details=None):
 
 
 def format_cwbtc(amount):
-    return f"{amount:,} cWBTC units"
+    return f"{amount:,} raw cWBTC"
 
 
-def print_asset_convention():
-    print("\nAsset convention (CCH Demo): 1 BTC = 1 cWBTC")
+def display_lightning_network(lnd_network):
+    return "testnet3" if lnd_network == "testnet" else lnd_network
+
+
+def print_asset_convention(lnd_network):
+    print("\nAsset convention: 1 sat BTC = 1 raw cWBTC for this demo")
+    print(
+        "Bitcoin/Lightning network: "
+        f"{display_lightning_network(lnd_network)} "
+        f"(LND/lncli network={lnd_network})"
+    )
 
 
 def print_balance_table(title, unit, rows):
@@ -527,12 +644,16 @@ def print_balance_table(title, unit, rows):
 
 
 def print_flow_summary(
+    number,
+    direction,
     path,
     payment_hash,
     principal_sats,
-    cch_fee_sats,
     source_paid,
     destination_received,
+    cch_fee_text,
+    fiber_route_fee_text,
+    lightning_route_fee_text,
     fiber_channel_id,
     fiber_before,
     fiber_after,
@@ -542,21 +663,25 @@ def print_flow_summary(
 ):
     border = "=" * 88
     print(f"\n{border}")
-    print(path)
+    print(f"FLOW {number} ({direction})")
+    print(f"MONEY PATH: {path}")
+    print(f"Payment hash: {payment_hash}")
     print(border)
-    print(f"Payment hash         : {payment_hash}")
     print(
         f"Principal            : {principal_sats:,} sats ↔ "
         f"{format_cwbtc(principal_sats)}"
     )
-    print(f"CCH fee              : {cch_fee_sats:,} sats")
-    print(f"Source paid          : {source_paid}")
-    print(f"Destination received : {destination_received}")
+    print(f"WHO PAID             : {source_paid}")
+    print(f"WHO RECEIVED         : {destination_received}")
+    print("FEE OWNERSHIP:")
+    print(f"  - CCH service fee     : {cch_fee_text}")
+    print(f"  - Fiber route fee     : {fiber_route_fee_text}")
+    print(f"  - Lightning route fee : {lightning_route_fee_text}")
     if show_channel_details:
         print(f"\nFiber channel: {fiber_channel_id}")
     print_balance_table(
         "Fiber balances",
-        "cWBTC units",
+        "raw cWBTC",
         [
             ("fiber2", fiber_before["fiber2"], fiber_after["fiber2"]),
             (
@@ -603,7 +728,7 @@ def create_fiber_invoice(config, amount_sats):
 def test_cch_daily_smoke_bidirectional():
     config = CchSmokeConfig.from_env()
     amount_sats = DAILY_SMOKE_AMOUNT_SATS
-    print_asset_convention()
+    print_asset_convention(config.lnd_network)
 
     channel = get_fiber_channel(config)
     fiber_channel_id = channel["channel_id"]
@@ -645,9 +770,26 @@ def test_cch_daily_smoke_bidirectional():
         ],
     )
     assert payment["payment_hash"] == send_payment_hash
-    wait_fiber_payment_status(config, send_payment_hash, "Success")
+    fiber_payment = wait_fiber_payment_status(
+        config,
+        send_payment_hash,
+        "Success",
+    )
     wait_cch_order_status(config, send_payment_hash, "Success")
     wait_lnd_invoice_settled(config, "lnd-b", send_payment_hash, amount_sats)
+    lnd_payment = wait_lnd_payment_succeeded(config, "lnd-a", send_payment_hash)
+
+    send_fiber_route_fee = hex_to_int(fiber_payment["fee"])
+    send_lightning_route_fee = int(lnd_payment["fee_sat"])
+    assert int(lnd_payment["value_sat"]) == amount_sats
+    assert send_fiber_route_fee == 0, (
+        "expected zero Fiber route fee on the direct fiber2/fiber1 channel; "
+        f"got {send_fiber_route_fee} raw cWBTC"
+    )
+    assert send_lightning_route_fee == 0, (
+        "expected zero Lightning route fee on the direct lnd-a/lnd-b channel; "
+        f"got {send_lightning_route_fee} sats"
+    )
 
     fiber_after = fiber_balances_from_f2_view(config, fiber_channel_id)
     lnd_after = lnd_channel_balances_from_a(config)
@@ -685,12 +827,28 @@ def test_cch_daily_smoke_bidirectional():
         lnd_details,
     )
     print_flow_summary(
-        path="FLOW 1: fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b",
+        number=1,
+        direction="cWBTC → BTC",
+        path=(
+            "fiber2 --cWBTC--> fiber1/CCH == CCH swap == "
+            "lnd-a --BTC--> lnd-b"
+        ),
         payment_hash=send_payment_hash,
         principal_sats=amount_sats,
-        cch_fee_sats=send_fee_sats,
-        source_paid=format_cwbtc(send_fiber_amount),
-        destination_received=f"{amount_sats:,} sats",
+        source_paid=f"fiber2 paid {format_cwbtc(send_fiber_amount)}",
+        destination_received=f"lnd-b received {amount_sats:,} sats",
+        cch_fee_text=(
+            f"{send_fee_sats:,} raw cWBTC; paid by fiber2, "
+            "retained by CCH at fiber1/CCH"
+        ),
+        fiber_route_fee_text=(
+            f"{send_fiber_route_fee:,} raw cWBTC; direct "
+            "fiber2 → fiber1/CCH channel, no intermediary receives a fee"
+        ),
+        lightning_route_fee_text=(
+            f"{send_lightning_route_fee:,} sats; direct "
+            "lnd-a → lnd-b channel, no intermediary receives a fee"
+        ),
         fiber_channel_id=fiber_channel_id,
         fiber_before=fiber_before,
         fiber_after=fiber_after,
@@ -721,8 +879,27 @@ def test_cch_daily_smoke_bidirectional():
     pay_lnd_invoice(config, "lnd-b", receive_order["incoming_invoice"]["Lightning"])
 
     wait_cch_order_status(config, receive_payment_hash, "Success")
+    fiber_payment = wait_fiber_payment_status(
+        config,
+        receive_payment_hash,
+        "Success",
+        rpc_url=config.f1_rpc,
+    )
     wait_fiber_invoice_status(config, receive_payment_hash, "Paid")
     wait_lnd_invoice_settled(config, "lnd-a", receive_payment_hash, lightning_amount)
+    lnd_payment = wait_lnd_payment_succeeded(config, "lnd-b", receive_payment_hash)
+
+    receive_fiber_route_fee = hex_to_int(fiber_payment["fee"])
+    receive_lightning_route_fee = int(lnd_payment["fee_sat"])
+    assert int(lnd_payment["value_sat"]) == lightning_amount
+    assert receive_fiber_route_fee == 0, (
+        "expected zero Fiber route fee on the direct fiber1/fiber2 channel; "
+        f"got {receive_fiber_route_fee} raw cWBTC"
+    )
+    assert receive_lightning_route_fee == 0, (
+        "expected zero Lightning route fee on the direct lnd-b/lnd-a channel; "
+        f"got {receive_lightning_route_fee} sats"
+    )
 
     fiber_after = fiber_balances_from_f2_view(config, fiber_channel_id)
     lnd_after = lnd_channel_balances_from_a(config)
@@ -760,12 +937,30 @@ def test_cch_daily_smoke_bidirectional():
         lnd_details,
     )
     print_flow_summary(
-        path="FLOW 2: lnd-b -> (lnd-a -> fiber1/CCH) -> fiber2",
+        number=2,
+        direction="BTC → cWBTC",
+        path=(
+            "lnd-b --BTC--> lnd-a/CCH == CCH swap == "
+            "fiber1/CCH --cWBTC--> fiber2"
+        ),
         payment_hash=receive_payment_hash,
         principal_sats=receive_fiber_amount,
-        cch_fee_sats=receive_fee_sats,
-        source_paid=f"{lightning_amount:,} sats",
-        destination_received=format_cwbtc(receive_fiber_amount),
+        source_paid=f"lnd-b paid {lightning_amount:,} sats",
+        destination_received=(
+            f"fiber2 received {format_cwbtc(receive_fiber_amount)}"
+        ),
+        cch_fee_text=(
+            f"{receive_fee_sats:,} sats; paid by lnd-b, "
+            "retained by CCH at lnd-a/CCH"
+        ),
+        fiber_route_fee_text=(
+            f"{receive_fiber_route_fee:,} raw cWBTC; direct "
+            "fiber1/CCH → fiber2 channel, no intermediary receives a fee"
+        ),
+        lightning_route_fee_text=(
+            f"{receive_lightning_route_fee:,} sats; direct "
+            "lnd-b → lnd-a/CCH channel, no intermediary receives a fee"
+        ),
         fiber_channel_id=fiber_channel_id,
         fiber_before=fiber_before,
         fiber_after=fiber_after,
