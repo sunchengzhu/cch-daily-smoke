@@ -1,7 +1,10 @@
+import subprocess
+from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
 
 import pytest
+import test_cch_daily_smoke as smoke
 
 from test_cch_daily_smoke import (
     active_lnd_channel,
@@ -13,18 +16,34 @@ from test_cch_daily_smoke import (
     print_asset_convention,
     print_flow_summary,
     receive_btc_amounts,
+    fnn,
     run_cmd,
 )
 
 
 def test_flow_summary_prints_before_after_and_change(capsys):
     print_flow_summary(
-        path="FLOW 1: fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b",
+        number=1,
+        direction="cWBTC → BTC",
+        path=(
+            "fiber2 --cWBTC--> fiber1/CCH == CCH swap == "
+            "lnd-a --BTC--> lnd-b"
+        ),
         payment_hash="0x1234",
         principal_sats=100,
-        cch_fee_sats=10,
-        source_paid=format_cwbtc(110),
-        destination_received="100 sats",
+        source_paid="fiber2 paid 110 raw cWBTC",
+        destination_received="lnd-b received 100 sats",
+        cch_fee_text=(
+            "10 raw cWBTC; paid by fiber2, retained by CCH at fiber1/CCH"
+        ),
+        fiber_route_fee_text=(
+            "0 raw cWBTC; direct fiber2 → fiber1/CCH channel, "
+            "no intermediary receives a fee"
+        ),
+        lightning_route_fee_text=(
+            "0 sats; direct lnd-a → lnd-b channel, "
+            "no intermediary receives a fee"
+        ),
         fiber_channel_id="0xfiber",
         fiber_before={"fiber2": 1000, "fiber1_cch": 0},
         fiber_after={"fiber2": 890, "fiber1_cch": 110},
@@ -38,10 +57,14 @@ def test_flow_summary_prints_before_after_and_change(capsys):
     )
 
     output = capsys.readouterr().out
-    assert "FLOW 1: fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b" in output
-    assert "Principal            : 100 sats ↔ 100 cWBTC units" in output
-    assert "Source paid          : 110 cWBTC units" in output
-    assert "Destination received : 100 sats" in output
+    assert "FLOW 1 (cWBTC → BTC)" in output
+    assert "fiber2 --cWBTC--> fiber1/CCH == CCH swap == lnd-a" in output
+    assert "Principal            : 100 sats ↔ 100 raw cWBTC" in output
+    assert "WHO PAID             : fiber2 paid 110 raw cWBTC" in output
+    assert "WHO RECEIVED         : lnd-b received 100 sats" in output
+    assert "CCH service fee     : 10 raw cWBTC" in output
+    assert "Fiber route fee     : 0 raw cWBTC" in output
+    assert "Lightning route fee : 0 sats" in output
     assert "fiber2" in output and "-110" in output
     assert "fiber1/CCH" in output and "+110" in output
     assert "lnd-a" in output and "-100" in output
@@ -53,12 +76,16 @@ def test_flow_summary_prints_before_after_and_change(capsys):
 
 def test_flow_summary_prints_channel_details_in_debug_mode(capsys):
     print_flow_summary(
+        number=2,
+        direction="BTC → cWBTC",
         path="debug flow",
         payment_hash="0x1234",
         principal_sats=100,
-        cch_fee_sats=10,
-        source_paid="110 sats",
-        destination_received=format_cwbtc(100),
+        source_paid="lnd-b paid 110 sats",
+        destination_received="fiber2 received 100 raw cWBTC",
+        cch_fee_text="10 sats; paid by lnd-b, retained by CCH at lnd-a/CCH",
+        fiber_route_fee_text="0 raw cWBTC; direct Fiber channel",
+        lightning_route_fee_text="0 sats; direct Lightning channel",
         fiber_channel_id="0xfiber",
         fiber_before={"fiber2": 1000, "fiber1_cch": 0},
         fiber_after={"fiber2": 900, "fiber1_cch": 100},
@@ -79,15 +106,51 @@ def test_flow_summary_prints_channel_details_in_debug_mode(capsys):
 
 
 def test_format_cwbtc_uses_integer_units():
-    assert format_cwbtc(100) == "100 cWBTC units"
-    assert format_cwbtc(100_000_000) == "100,000,000 cWBTC units"
+    assert format_cwbtc(100) == "100 raw cWBTC"
+    assert format_cwbtc(100_000_000) == "100,000,000 raw cWBTC"
 
 
 def test_asset_convention_is_printed_once(capsys):
-    print_asset_convention()
+    print_asset_convention("testnet4")
 
     output = capsys.readouterr().out
-    assert output.strip() == "Asset convention (CCH Demo): 1 BTC = 1 cWBTC"
+    assert output.strip().splitlines() == [
+        "Asset convention: 1 sat BTC = 1 raw cWBTC for this demo",
+        "Bitcoin/Lightning network: testnet4 (LND/lncli network=testnet4)",
+    ]
+
+
+def test_wait_lnd_payment_succeeded_returns_actual_route_fee(monkeypatch):
+    config = SimpleNamespace(wait_timeout=1)
+    calls = []
+    payment = {
+        "payment_hash": "1234",
+        "status": "SUCCEEDED",
+        "value_sat": "100",
+        "fee_sat": "0",
+    }
+    def fake_lncli_json(_config, node_name, args):
+        calls.append((node_name, args))
+        return {"payments": [payment]}
+
+    monkeypatch.setattr(smoke, "lncli_json", fake_lncli_json)
+    monkeypatch.setattr(
+        smoke,
+        "wait_until",
+        lambda _description, check, _timeout: check(),
+    )
+
+    assert smoke.wait_lnd_payment_succeeded(config, "lnd-a", "0x1234") == payment
+    assert calls == [
+        (
+            "lnd-a",
+            [
+                "listpayments",
+                "--include_incomplete",
+                "--max_payments=100",
+            ],
+        )
+    ]
 
 
 def test_receive_btc_develop_amount_includes_fee():
@@ -224,3 +287,77 @@ def test_failed_command_redacts_auth_token(monkeypatch):
 
     assert "secret-token" not in str(error.value)
     assert "--auth-token '***'" in str(error.value)
+
+
+def test_timed_out_command_redacts_auth_token_and_output(monkeypatch):
+    def time_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            args[0],
+            kwargs["timeout"],
+            output="partial secret-token output",
+            stderr="secret-token error",
+        )
+
+    monkeypatch.setattr("test_cch_daily_smoke.subprocess.run", time_out)
+
+    with pytest.raises(AssertionError) as error:
+        run_cmd(["fnn", "--auth-token", "secret-token", "info"], timeout=1)
+
+    message = str(error.value)
+    assert "secret-token" not in message
+    assert "--auth-token '***'" in message
+    assert "partial *** output" in message
+    assert "*** error" in message
+
+
+def test_fnn_converts_env_token_to_private_temporary_file(monkeypatch):
+    observed = {}
+    config = SimpleNamespace(fnn_cli="fnn-cli", command_timeout=9)
+
+    monkeypatch.delenv("CCH_SMOKE_FNN_AUTH_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("CCH_SMOKE_FNN_AUTH_TOKEN", "secret-token")
+
+    def fake_run_cmd(args, timeout):
+        token_file = Path(args[args.index("--auth-token-file") + 1])
+        observed.update(
+            args=list(args),
+            timeout=timeout,
+            token_file=token_file,
+            token=token_file.read_text(encoding="utf-8"),
+            mode=token_file.stat().st_mode & 0o777,
+        )
+        return '{"ok":true}'
+
+    monkeypatch.setattr(smoke, "run_cmd", fake_run_cmd)
+
+    assert fnn(config, "http://fnn", ["info"]) == {"ok": True}
+    assert "--auth-token" not in observed["args"]
+    assert "secret-token" not in observed["args"]
+    assert observed["token"] == "secret-token"
+    assert observed["mode"] == 0o600
+    assert observed["timeout"] == 9
+    assert not observed["token_file"].exists()
+
+
+def test_fnn_does_not_forward_raw_token_environment(monkeypatch, tmp_path):
+    token_file = tmp_path / "fnn.token"
+    token_file.write_text("file-token", encoding="utf-8")
+    observed = {}
+
+    monkeypatch.setenv("CCH_SMOKE_FNN_AUTH_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("CCH_SMOKE_FNN_AUTH_TOKEN", "raw-token")
+    monkeypatch.setenv("CCH_FIBER_SWAP_FNN_AUTH_TOKEN", "fiber-swap-token")
+
+    def fake_subprocess_run(args, **kwargs):
+        observed.update(args=list(args), env=kwargs["env"])
+        return CompletedProcess(args=args, returncode=0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr("test_cch_daily_smoke.subprocess.run", fake_subprocess_run)
+    config = SimpleNamespace(fnn_cli="fnn-cli", command_timeout=9)
+
+    assert fnn(config, "http://fnn", ["info"]) == {"ok": True}
+    assert observed["args"].count("--auth-token-file") == 1
+    assert "--auth-token" not in observed["args"]
+    assert "CCH_SMOKE_FNN_AUTH_TOKEN" not in observed["env"]
+    assert "CCH_FIBER_SWAP_FNN_AUTH_TOKEN" not in observed["env"]
+    assert token_file.exists()

@@ -14,6 +14,10 @@ SERVICE2="${CCH_SMOKE_FIBER_SERVICE2:-fiber-testnet2.service}"
 F1_RPC="${CCH_SMOKE_F1_RPC:-http://127.0.0.1:8227}"
 F2_RPC="${CCH_SMOKE_F2_RPC:-http://127.0.0.1:8229}"
 AUTH_TOKEN="${CCH_SMOKE_FNN_AUTH_TOKEN:-}"
+AUTH_TOKEN_FILE="${CCH_SMOKE_FNN_AUTH_TOKEN_FILE:-}"
+# Keep the compatibility value only as a non-exported shell variable until it
+# is written to a private file. Child processes must never inherit the token.
+unset CCH_SMOKE_FNN_AUTH_TOKEN
 BACKUP_ROOT="${CCH_SMOKE_FNN_BACKUP_ROOT:-/home/ckb/fiber-test/testnet/.binary-backups}"
 
 TMP_DIR="$(mktemp -d)"
@@ -105,6 +109,14 @@ trap cleanup EXIT
 for command in awk curl jq tar sha256sum sudo systemctl install seq; do
   require_command "$command"
 done
+
+if [[ -z "$AUTH_TOKEN_FILE" && -n "$AUTH_TOKEN" ]]; then
+  AUTH_TOKEN_FILE="$TMP_DIR/fnn-auth-token"
+  (umask 077; printf '%s' "$AUTH_TOKEN" >"$AUTH_TOKEN_FILE")
+fi
+# The health-check subprocesses receive only the credential file path. Do not
+# leave the raw token exported in their environment after converting it.
+unset AUTH_TOKEN
 
 for file in \
   "$NODE1_DIR/fnn" \
@@ -370,8 +382,12 @@ else
   log "Fiber binaries are already current; restart is not needed"
 fi
 
-[[ -n "$AUTH_TOKEN" ]] || {
-  printf 'CCH_SMOKE_FNN_AUTH_TOKEN is required for RPC health checks\n' >&2
+[[ -n "$AUTH_TOKEN_FILE" ]] || {
+  printf 'CCH_SMOKE_FNN_AUTH_TOKEN or CCH_SMOKE_FNN_AUTH_TOKEN_FILE is required for RPC health checks\n' >&2
+  exit 1
+}
+[[ -r "$AUTH_TOKEN_FILE" ]] || {
+  printf 'FNN auth token file is not readable: %s\n' "$AUTH_TOKEN_FILE" >&2
   exit 1
 }
 
@@ -389,7 +405,7 @@ wait_for_rpc() {
         -u "$rpc_url" \
         -o json \
         --no-banner \
-        --auth-token "$AUTH_TOKEN" \
+        --auth-token-file "$AUTH_TOKEN_FILE" \
         info 2>"$error_file"
     )"; then
       jq --arg node "$node_name" \
