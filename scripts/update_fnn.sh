@@ -37,6 +37,14 @@ require_command() {
   }
 }
 
+write_github_output() {
+  local name="$1"
+  local value="$2"
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf '%s=%s\n' "$name" "$value" >>"$GITHUB_OUTPUT"
+  fi
+}
+
 read_fnn_conf_value() {
   local key="$1"
   local conf="$2"
@@ -246,6 +254,8 @@ case "$FNN_SOURCE" in
     ;;
 esac
 
+write_github_output fnn_package "$TARGET_LABEL"
+
 log "downloading $ASSET_NAME"
 curl -fL --retry 3 -o "$TMP_DIR/$ASSET_NAME" "$ASSET_URL"
 
@@ -280,6 +290,7 @@ elif [[ "$FNN_SOURCE" == "release" ]]; then
 fi
 
 TARGET_FNN_VERSION="$("$TMP_DIR/fnn" --version | head -n 1)"
+write_github_output fnn_version "$TARGET_FNN_VERSION"
 NODE1_FNN_VERSION="$("$NODE1_DIR/fnn" --version | head -n 1)"
 NODE2_FNN_VERSION="$("$NODE2_DIR/fnn" --version | head -n 1)"
 NODE1_CLI_VERSION="missing"

@@ -11,6 +11,22 @@
 
 > 本 Demo 按 `1 sat BTC = 1 raw cWBTC` 计价（即 `1 BTC = 1 cWBTC`）。
 
+## 定时报告
+
+GitHub Actions 的 `schedule` 运行结束后，无论成功还是失败，都会向配置的 Discord
+webhook 发送一张状态卡片；`workflow_dispatch` 手动运行默认不发送报告。卡片包含总结果、
+FNN 来源和版本、总耗时、前置检查状态，以及三组 smoke 各自的状态、耗时、双向金额、
+手续费和净变化。失败时会直接标出失败或未执行的阶段，并保留完整运行日志链接。
+
+需要临时预览卡片时，可以手动运行 workflow 并勾选 `send_discord_report`；该开关
+默认关闭，未勾选的普通手动运行仍不会发送。
+
+需要在仓库中配置：
+
+```bash
+gh secret set DISCORD_WEBHOOK_URL --repo sunchengzhu/cch-daily-smoke
+```
+
 原有本地 CCH 路径：
 
 - `fiber2 -> (fiber1/CCH -> lnd-a) -> lnd-b`

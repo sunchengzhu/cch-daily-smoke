@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from smoke_report import emit_smoke_report
+
 CWBTC_SCRIPT = {
     "code_hash": "0x25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
     "hash_type": "type",
@@ -778,7 +780,57 @@ def create_fiber_invoice(config, amount_sats):
     return invoice["invoice_address"], invoice["invoice"]["data"]["payment_hash"]
 
 
+def build_cch_smoke_report(
+    *,
+    duration_seconds,
+    amount_sats,
+    send_fiber_amount,
+    receive_fiber_amount,
+    lightning_amount,
+    send_cch_fee,
+    receive_cch_fee,
+    send_fiber_fee,
+    receive_fiber_fee,
+    send_lightning_fee,
+    receive_lightning_fee,
+):
+    return {
+        "duration_seconds": round(duration_seconds, 2),
+        "topology": "fiber2 ↔ fiber1/CCH; lnd-a ↔ lnd-b (local CCH)",
+        "flows": [
+            {
+                "direction": "cWBTC → BTC",
+                "paid": f"fiber2 paid {send_fiber_amount:,} raw cWBTC",
+                "received": f"lnd-b received {amount_sats:,} sats",
+            },
+            {
+                "direction": "BTC → cWBTC",
+                "paid": f"lnd-b paid {lightning_amount:,} sats",
+                "received": (
+                    f"fiber2 received {receive_fiber_amount:,} raw cWBTC"
+                ),
+            },
+        ],
+        "fees": {
+            "CCH": (
+                f"{send_cch_fee:,} raw cWBTC + {receive_cch_fee:,} sats"
+            ),
+            "Lightning": (
+                f"{send_lightning_fee + receive_lightning_fee:,} sats"
+            ),
+            "Fiber": f"{send_fiber_fee + receive_fiber_fee:,} raw cWBTC",
+        },
+        "net": {
+            "fiber2": (
+                f"{receive_fiber_amount - send_fiber_amount:+,} raw cWBTC"
+            ),
+            "lnd-b": f"{amount_sats - lightning_amount:+,} sats",
+        },
+    }
+
+
 def test_cch_daily_smoke_bidirectional():
+    started_at = time.monotonic()
     config = CchSmokeConfig.from_env()
     amount_sats = DAILY_SMOKE_AMOUNT_SATS
     print_asset_convention(config.lnd_network)
@@ -1033,3 +1085,18 @@ def test_cch_daily_smoke_bidirectional():
     )
 
     print("\nCCH daily smoke completed: both directions passed.")
+    emit_smoke_report(
+        build_cch_smoke_report(
+            duration_seconds=time.monotonic() - started_at,
+            amount_sats=amount_sats,
+            send_fiber_amount=send_fiber_amount,
+            receive_fiber_amount=receive_fiber_amount,
+            lightning_amount=lightning_amount,
+            send_cch_fee=send_fee_sats,
+            receive_cch_fee=receive_fee_sats,
+            send_fiber_fee=send_fiber_route_fee,
+            receive_fiber_fee=receive_fiber_route_fee,
+            send_lightning_fee=send_lightning_route_fee,
+            receive_lightning_fee=receive_lightning_route_fee,
+        )
+    )

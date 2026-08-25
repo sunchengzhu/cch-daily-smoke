@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from smoke_report import emit_smoke_report
 from test_cch_daily_smoke import (
     CWBTC_SCRIPT,
     assert_balance_delta,
@@ -1337,6 +1338,8 @@ def run_flow_1_btc_to_cwbtc(config: FiberSwapSmokeConfig):
         "principal": principal,
         "cch_fee": cch_fee,
         "lnd_outflow": lnd_outflow,
+        "lightning_route_fee": lightning_route_fee,
+        "fiber_route_fee": None,
         "fiber_before": fiber_before,
         "fiber_after": fiber_after,
         "lnd_before": lnd_before,
@@ -1487,13 +1490,66 @@ def run_flow_2_cwbtc_to_btc(config: FiberSwapSmokeConfig, flow_1: dict):
         "btc_principal": btc_principal,
         "cch_fee": cch_fee,
         "fiber_route_fee": fiber_route_fee,
+        "lightning_route_fee": 0,
         "fiber_total": fiber_total,
         "fiber_after": fiber_after,
         "lnd_after": lnd_after,
     }
 
 
+def build_fiber_swap_smoke_report(duration_seconds, flow_1, flow_2):
+    fiber2_net = (
+        flow_2["fiber_after"]["fiber2"] - flow_1["fiber_before"]["fiber2"]
+    )
+    lnd_d_net = flow_2["lnd_after"]["lnd-d"] - flow_1["lnd_before"]["lnd-d"]
+    flow_1_fiber_fee = (
+        "not exposed"
+        if flow_1["fiber_route_fee"] is None
+        else f"{flow_1['fiber_route_fee']:,} raw cWBTC"
+    )
+    return {
+        "duration_seconds": round(duration_seconds, 2),
+        "topology": (
+            "lnd-d ↔ FiberSwap CCH LND; "
+            "fiber2 ↔ Bottle ↔ FiberSwap CCH FNN"
+        ),
+        "flows": [
+            {
+                "direction": "BTC → cWBTC",
+                "paid": f"lnd-d paid {flow_1['lnd_outflow']:,} sats",
+                "received": (
+                    f"fiber2 received {flow_1['principal']:,} raw cWBTC"
+                ),
+            },
+            {
+                "direction": "cWBTC → BTC",
+                "paid": f"fiber2 paid {flow_2['fiber_total']:,} raw cWBTC",
+                "received": f"lnd-d received {flow_2['btc_principal']:,} sats",
+            },
+        ],
+        "fees": {
+            "CCH": (
+                f"{flow_1['cch_fee']:,} sats + "
+                f"{flow_2['cch_fee']:,} raw cWBTC"
+            ),
+            "Lightning": (
+                f"FLOW 1 {flow_1['lightning_route_fee']:,} sats; "
+                f"FLOW 2 {flow_2['lightning_route_fee']:,} sats"
+            ),
+            "Fiber": (
+                f"FLOW 1 {flow_1_fiber_fee}; "
+                f"FLOW 2 {flow_2['fiber_route_fee']:,} raw cWBTC"
+            ),
+        },
+        "net": {
+            "fiber2": f"{fiber2_net:+,} raw cWBTC",
+            "lnd-d": f"{lnd_d_net:+,} sats",
+        },
+    }
+
+
 def test_fiber_swap_bidirectional():
+    started_at = time.monotonic()
     config = FiberSwapSmokeConfig.from_env()
 
     info = fiber_swap_lncli_json(config, ["getinfo"])
@@ -1526,3 +1582,10 @@ def test_fiber_swap_bidirectional():
         "(CCH service fees plus aggregate Fiber routing fee are real costs)"
     )
     print("=" * 100)
+    emit_smoke_report(
+        build_fiber_swap_smoke_report(
+            time.monotonic() - started_at,
+            flow_1,
+            flow_2,
+        )
+    )
