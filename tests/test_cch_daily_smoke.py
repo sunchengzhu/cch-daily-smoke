@@ -429,13 +429,22 @@ def wait_lnd_payment_succeeded(config, node_name, payment_hash):
     )
 
 
-def active_lnd_channel(node_channels, remote_pubkey, channel_id=None):
+def active_lnd_channel(
+    node_channels,
+    remote_pubkey,
+    channel_id=None,
+    channel_point=None,
+):
     matches = [
         channel
         for channel in node_channels.get("channels", [])
         if channel.get("remote_pubkey") == remote_pubkey
         and channel.get("active", True)
         and (channel_id is None or channel.get("chan_id") == channel_id)
+        and (
+            channel_point is None
+            or channel.get("channel_point") == channel_point
+        )
     ]
     if not matches:
         available = [
@@ -454,19 +463,63 @@ def active_lnd_channel(node_channels, remote_pubkey, channel_id=None):
     return matches[0]
 
 
-def lnd_channel_balances_from_a(config):
+def lnd_channel_balances_from_a(config, channel_point=None):
     lnd_b_pubkey = lncli_json(config, "lnd-b", ["getinfo"])["identity_pubkey"]
     channel = active_lnd_channel(
         lncli_json(config, "lnd-a", ["listchannels"]),
         lnd_b_pubkey,
         config.lnd_channel_id,
+        channel_point,
     )
     return {
         "chan_id": channel["chan_id"],
         "channel_point": channel["channel_point"],
         "lnd_a": int(channel["local_balance"]),
         "lnd_b": int(channel["remote_balance"]),
+        "pending_htlcs_count": len(channel.get("pending_htlcs") or []),
     }
+
+
+def wait_lnd_channel_balance_delta(
+    config,
+    before,
+    expected_lnd_a_delta,
+    expected_lnd_b_delta,
+    interval=0.5,
+):
+    """Wait for LND's channel snapshot to reflect a completed payment."""
+
+    channel_point = before["channel_point"]
+    expected_lnd_a = before["lnd_a"] + expected_lnd_a_delta
+    expected_lnd_b = before["lnd_b"] + expected_lnd_b_delta
+    deadline = time.monotonic() + config.wait_timeout
+    last = None
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            last = lnd_channel_balances_from_a(config, channel_point)
+            last_error = None
+        except pytest.fail.Exception as exc:
+            last_error = str(exc)
+            time.sleep(interval)
+            continue
+        except Exception as exc:  # listchannels/getinfo are read-only queries.
+            last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(interval)
+            continue
+        if (
+            last["pending_htlcs_count"] == 0
+            and last["lnd_a"] == expected_lnd_a
+            and last["lnd_b"] == expected_lnd_b
+        ):
+            return last
+        time.sleep(interval)
+    raise AssertionError(
+        "timed out waiting for LND channel balance update: "
+        f"channel_point={channel_point}, "
+        f"expected_lnd_a={expected_lnd_a}, expected_lnd_b={expected_lnd_b}, "
+        f"last={last}, last_error={last_error}"
+    )
 
 
 def lnd_b_liquidity(config):
@@ -792,7 +845,12 @@ def test_cch_daily_smoke_bidirectional():
     )
 
     fiber_after = fiber_balances_from_f2_view(config, fiber_channel_id)
-    lnd_after = lnd_channel_balances_from_a(config)
+    lnd_after = wait_lnd_channel_balance_delta(
+        config,
+        lnd_before,
+        -amount_sats,
+        amount_sats,
+    )
     fiber_details = f"fiber_channel_id={fiber_channel_id}"
     lnd_details = (
         f"lnd_channel_id={lnd_before['chan_id']}, "
@@ -902,7 +960,12 @@ def test_cch_daily_smoke_bidirectional():
     )
 
     fiber_after = fiber_balances_from_f2_view(config, fiber_channel_id)
-    lnd_after = lnd_channel_balances_from_a(config)
+    lnd_after = wait_lnd_channel_balance_delta(
+        config,
+        lnd_before,
+        lightning_amount,
+        -lightning_amount,
+    )
     fiber_details = f"fiber_channel_id={fiber_channel_id}"
     lnd_details = (
         f"lnd_channel_id={lnd_before['chan_id']}, "

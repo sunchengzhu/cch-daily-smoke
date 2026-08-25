@@ -153,6 +153,95 @@ def test_wait_lnd_payment_succeeded_returns_actual_route_fee(monkeypatch):
     ]
 
 
+def test_wait_lnd_channel_balance_retries_stale_and_pending_snapshots(
+    monkeypatch,
+):
+    config = SimpleNamespace(wait_timeout=1)
+    before = {
+        "channel_point": "funding:1",
+        "lnd_a": 1_000,
+        "lnd_b": 500,
+    }
+    snapshots = iter(
+        [
+            {
+                "channel_point": "funding:1",
+                "lnd_a": 1_000,
+                "lnd_b": 500,
+                "pending_htlcs_count": 0,
+            },
+            {
+                "channel_point": "funding:1",
+                "lnd_a": 1_110,
+                "lnd_b": 390,
+                "pending_htlcs_count": 1,
+            },
+            {
+                "channel_point": "funding:1",
+                "lnd_a": 1_110,
+                "lnd_b": 390,
+                "pending_htlcs_count": 0,
+            },
+        ]
+    )
+    channel_points = []
+
+    def load(_config, channel_point):
+        channel_points.append(channel_point)
+        return next(snapshots)
+
+    monkeypatch.setattr(smoke, "lnd_channel_balances_from_a", load)
+    monkeypatch.setattr(smoke.time, "sleep", lambda _interval: None)
+
+    result = smoke.wait_lnd_channel_balance_delta(
+        config,
+        before,
+        expected_lnd_a_delta=110,
+        expected_lnd_b_delta=-110,
+    )
+
+    assert result["lnd_a"] == 1_110
+    assert result["lnd_b"] == 390
+    assert result["pending_htlcs_count"] == 0
+    assert channel_points == ["funding:1"] * 3
+
+
+def test_wait_lnd_channel_balance_timeout_reports_last_snapshot(monkeypatch):
+    config = SimpleNamespace(wait_timeout=1)
+    before = {
+        "channel_point": "funding:1",
+        "lnd_a": 1_000,
+        "lnd_b": 500,
+    }
+    stale = {
+        "channel_point": "funding:1",
+        "lnd_a": 1_000,
+        "lnd_b": 500,
+        "pending_htlcs_count": 0,
+    }
+    monotonic_values = iter([0, 0, 2])
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(smoke.time, "sleep", lambda _interval: None)
+    monkeypatch.setattr(
+        smoke,
+        "lnd_channel_balances_from_a",
+        lambda _config, _channel_point: stale,
+    )
+
+    with pytest.raises(AssertionError) as error:
+        smoke.wait_lnd_channel_balance_delta(
+            config,
+            before,
+            expected_lnd_a_delta=110,
+            expected_lnd_b_delta=-110,
+        )
+
+    message = str(error.value)
+    assert "channel_point=funding:1" in message
+    assert "expected_lnd_a=1110" in message
+    assert "'lnd_a': 1000" in message
+
+
 def test_receive_btc_develop_amount_includes_fee():
     assert receive_btc_amounts(110, 100, 10, "develop") == (100, 110)
 
@@ -272,6 +361,33 @@ def test_channel_selection_failure_lists_available_channels():
 
     with pytest.raises(pytest.fail.Exception, match="lnd-channel"):
         active_lnd_channel(channels, remote_pubkey="expected-peer")
+
+
+def test_channel_selection_can_be_locked_to_channel_point():
+    channels = {
+        "channels": [
+            {
+                "chan_id": "first",
+                "channel_point": "funding:0",
+                "remote_pubkey": "peer",
+                "active": True,
+            },
+            {
+                "chan_id": "second",
+                "channel_point": "funding:1",
+                "remote_pubkey": "peer",
+                "active": True,
+            },
+        ]
+    }
+
+    selected = active_lnd_channel(
+        channels,
+        remote_pubkey="peer",
+        channel_point="funding:1",
+    )
+
+    assert selected["chan_id"] == "second"
 
 
 def test_failed_command_redacts_auth_token(monkeypatch):
