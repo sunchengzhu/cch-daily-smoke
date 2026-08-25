@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from smoke_report import emit_smoke_report
+
 CWBTC_SCRIPT = {
     "code_hash": "0x25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
     "hash_type": "type",
@@ -429,13 +431,22 @@ def wait_lnd_payment_succeeded(config, node_name, payment_hash):
     )
 
 
-def active_lnd_channel(node_channels, remote_pubkey, channel_id=None):
+def active_lnd_channel(
+    node_channels,
+    remote_pubkey,
+    channel_id=None,
+    channel_point=None,
+):
     matches = [
         channel
         for channel in node_channels.get("channels", [])
         if channel.get("remote_pubkey") == remote_pubkey
         and channel.get("active", True)
         and (channel_id is None or channel.get("chan_id") == channel_id)
+        and (
+            channel_point is None
+            or channel.get("channel_point") == channel_point
+        )
     ]
     if not matches:
         available = [
@@ -454,19 +465,63 @@ def active_lnd_channel(node_channels, remote_pubkey, channel_id=None):
     return matches[0]
 
 
-def lnd_channel_balances_from_a(config):
+def lnd_channel_balances_from_a(config, channel_point=None):
     lnd_b_pubkey = lncli_json(config, "lnd-b", ["getinfo"])["identity_pubkey"]
     channel = active_lnd_channel(
         lncli_json(config, "lnd-a", ["listchannels"]),
         lnd_b_pubkey,
         config.lnd_channel_id,
+        channel_point,
     )
     return {
         "chan_id": channel["chan_id"],
         "channel_point": channel["channel_point"],
         "lnd_a": int(channel["local_balance"]),
         "lnd_b": int(channel["remote_balance"]),
+        "pending_htlcs_count": len(channel.get("pending_htlcs") or []),
     }
+
+
+def wait_lnd_channel_balance_delta(
+    config,
+    before,
+    expected_lnd_a_delta,
+    expected_lnd_b_delta,
+    interval=0.5,
+):
+    """Wait for LND's channel snapshot to reflect a completed payment."""
+
+    channel_point = before["channel_point"]
+    expected_lnd_a = before["lnd_a"] + expected_lnd_a_delta
+    expected_lnd_b = before["lnd_b"] + expected_lnd_b_delta
+    deadline = time.monotonic() + config.wait_timeout
+    last = None
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            last = lnd_channel_balances_from_a(config, channel_point)
+            last_error = None
+        except pytest.fail.Exception as exc:
+            last_error = str(exc)
+            time.sleep(interval)
+            continue
+        except Exception as exc:  # listchannels/getinfo are read-only queries.
+            last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(interval)
+            continue
+        if (
+            last["pending_htlcs_count"] == 0
+            and last["lnd_a"] == expected_lnd_a
+            and last["lnd_b"] == expected_lnd_b
+        ):
+            return last
+        time.sleep(interval)
+    raise AssertionError(
+        "timed out waiting for LND channel balance update: "
+        f"channel_point={channel_point}, "
+        f"expected_lnd_a={expected_lnd_a}, expected_lnd_b={expected_lnd_b}, "
+        f"last={last}, last_error={last_error}"
+    )
 
 
 def lnd_b_liquidity(config):
@@ -725,7 +780,57 @@ def create_fiber_invoice(config, amount_sats):
     return invoice["invoice_address"], invoice["invoice"]["data"]["payment_hash"]
 
 
+def build_cch_smoke_report(
+    *,
+    duration_seconds,
+    amount_sats,
+    send_fiber_amount,
+    receive_fiber_amount,
+    lightning_amount,
+    send_cch_fee,
+    receive_cch_fee,
+    send_fiber_fee,
+    receive_fiber_fee,
+    send_lightning_fee,
+    receive_lightning_fee,
+):
+    return {
+        "duration_seconds": round(duration_seconds, 2),
+        "topology": "fiber2 ↔ fiber1/CCH; lnd-a ↔ lnd-b (local CCH)",
+        "flows": [
+            {
+                "direction": "cWBTC → BTC",
+                "paid": f"fiber2 paid {send_fiber_amount:,} raw cWBTC",
+                "received": f"lnd-b received {amount_sats:,} sats",
+            },
+            {
+                "direction": "BTC → cWBTC",
+                "paid": f"lnd-b paid {lightning_amount:,} sats",
+                "received": (
+                    f"fiber2 received {receive_fiber_amount:,} raw cWBTC"
+                ),
+            },
+        ],
+        "fees": {
+            "CCH": (
+                f"{send_cch_fee:,} raw cWBTC + {receive_cch_fee:,} sats"
+            ),
+            "Lightning": (
+                f"{send_lightning_fee + receive_lightning_fee:,} sats"
+            ),
+            "Fiber": f"{send_fiber_fee + receive_fiber_fee:,} raw cWBTC",
+        },
+        "net": {
+            "fiber2": (
+                f"{receive_fiber_amount - send_fiber_amount:+,} raw cWBTC"
+            ),
+            "lnd-b": f"{amount_sats - lightning_amount:+,} sats",
+        },
+    }
+
+
 def test_cch_daily_smoke_bidirectional():
+    started_at = time.monotonic()
     config = CchSmokeConfig.from_env()
     amount_sats = DAILY_SMOKE_AMOUNT_SATS
     print_asset_convention(config.lnd_network)
@@ -792,7 +897,12 @@ def test_cch_daily_smoke_bidirectional():
     )
 
     fiber_after = fiber_balances_from_f2_view(config, fiber_channel_id)
-    lnd_after = lnd_channel_balances_from_a(config)
+    lnd_after = wait_lnd_channel_balance_delta(
+        config,
+        lnd_before,
+        -amount_sats,
+        amount_sats,
+    )
     fiber_details = f"fiber_channel_id={fiber_channel_id}"
     lnd_details = (
         f"lnd_channel_id={lnd_before['chan_id']}, "
@@ -902,7 +1012,12 @@ def test_cch_daily_smoke_bidirectional():
     )
 
     fiber_after = fiber_balances_from_f2_view(config, fiber_channel_id)
-    lnd_after = lnd_channel_balances_from_a(config)
+    lnd_after = wait_lnd_channel_balance_delta(
+        config,
+        lnd_before,
+        lightning_amount,
+        -lightning_amount,
+    )
     fiber_details = f"fiber_channel_id={fiber_channel_id}"
     lnd_details = (
         f"lnd_channel_id={lnd_before['chan_id']}, "
@@ -970,3 +1085,18 @@ def test_cch_daily_smoke_bidirectional():
     )
 
     print("\nCCH daily smoke completed: both directions passed.")
+    emit_smoke_report(
+        build_cch_smoke_report(
+            duration_seconds=time.monotonic() - started_at,
+            amount_sats=amount_sats,
+            send_fiber_amount=send_fiber_amount,
+            receive_fiber_amount=receive_fiber_amount,
+            lightning_amount=lightning_amount,
+            send_cch_fee=send_fee_sats,
+            receive_cch_fee=receive_fee_sats,
+            send_fiber_fee=send_fiber_route_fee,
+            receive_fiber_fee=receive_fiber_route_fee,
+            send_lightning_fee=send_lightning_route_fee,
+            receive_lightning_fee=receive_lightning_route_fee,
+        )
+    )

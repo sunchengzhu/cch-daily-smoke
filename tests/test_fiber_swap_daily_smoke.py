@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from smoke_report import emit_smoke_report
 from test_cch_daily_smoke import (
     CWBTC_SCRIPT,
     assert_balance_delta,
@@ -413,7 +414,11 @@ def find_lnd_payment(config: FiberSwapSmokeConfig, payment_hash: str):
     )
 
 
-def wait_lnd_payment_succeeded(config: FiberSwapSmokeConfig, payment_hash: str):
+def wait_lnd_payment_succeeded(
+    config: FiberSwapSmokeConfig,
+    payment_hash: str,
+    lnd_label: str = "lnd-d",
+):
     deadline = time.monotonic() + config.wait_timeout
     last = None
     last_error = None
@@ -430,11 +435,12 @@ def wait_lnd_payment_succeeded(config: FiberSwapSmokeConfig, payment_hash: str):
                 return last
             if last.get("status") == "FAILED":
                 raise AssertionError(
-                    "lnd-d payment failed: " + json.dumps(last, sort_keys=True)
+                    f"{lnd_label} payment failed: "
+                    + json.dumps(last, sort_keys=True)
                 )
         time.sleep(2)
     raise AssertionError(
-        f"timed out waiting for lnd-d payment {payment_hash}; "
+        f"timed out waiting for {lnd_label} payment {payment_hash}; "
         f"last value: {last}; last read error: {last_error}"
     )
 
@@ -477,6 +483,7 @@ def wait_flow_2_success(
     config: FiberSwapSmokeConfig,
     payment_hash: str,
     expected_sats: int,
+    lnd_label: str = "lnd-d",
 ):
     """Poll all three FLOW 2 participants and fail on any terminal error."""
 
@@ -508,7 +515,7 @@ def wait_flow_2_success(
                 ),
             ),
             (
-                "lnd-d invoice",
+                f"{lnd_label} invoice",
                 lambda: fiber_swap_lncli_json(
                     config, ["lookupinvoice", wanted]
                 ),
@@ -517,7 +524,7 @@ def wait_flow_2_success(
         values = {
             "Fiber payment": fiber_payment,
             "FiberSwap order": order,
-            "lnd-d invoice": lnd_invoice,
+            f"{lnd_label} invoice": lnd_invoice,
         }
         for label, load in reads:
             try:
@@ -528,7 +535,7 @@ def wait_flow_2_success(
 
         fiber_payment = values["Fiber payment"]
         order = values["FiberSwap order"]
-        lnd_invoice = values["lnd-d invoice"]
+        lnd_invoice = values[f"{lnd_label} invoice"]
         summary = {
             "fiber": {
                 "status": (fiber_payment or {}).get("status"),
@@ -536,7 +543,7 @@ def wait_flow_2_success(
                 "fee": (fiber_payment or {}).get("fee"),
             },
             "order": {"status": (order or {}).get("status")},
-            "lnd-d": {
+            lnd_label: {
                 "state": (lnd_invoice or {}).get("state"),
                 "amt_paid_sat": (lnd_invoice or {}).get("amt_paid_sat"),
             },
@@ -563,7 +570,8 @@ def wait_flow_2_success(
         ):
             paid = int(lnd_invoice.get("amt_paid_sat", "0"))
             assert paid == expected_sats, (
-                f"lnd-d invoice paid amount mismatch: {paid} != {expected_sats}"
+                f"{lnd_label} invoice paid amount mismatch: "
+                f"{paid} != {expected_sats}"
             )
             return fiber_payment, order, lnd_invoice
 
@@ -676,6 +684,86 @@ def wait_lnd_channel_quiescent(config: FiberSwapSmokeConfig):
     )
 
 
+def lnd_channel_balance_snapshot(
+    channel: dict,
+    local_label: str,
+    remote_label: str,
+):
+    local = int(channel["local_balance"])
+    remote = int(channel["remote_balance"])
+    local_reserve = int(channel.get("local_chan_reserve_sat") or 0)
+    remote_reserve = int(channel.get("remote_chan_reserve_sat") or 0)
+    balances = {
+        "chan_id": str(channel.get("chan_id", "")),
+        "channel_point": channel["channel_point"],
+        local_label: local,
+        remote_label: remote,
+        f"{local_label} spendable": max(0, local - local_reserve),
+        f"{remote_label} spendable": max(0, remote - remote_reserve),
+    }
+    # Preserve field absence so legacy lncli output can fall back to the
+    # decimal chan_id. An injected empty scid would incorrectly select the
+    # modern field and make lnd_outgoing_chan_id() fail.
+    if "scid" in channel:
+        balances["scid"] = str(channel["scid"])
+    return balances
+
+
+def wait_lnd_balance_snapshot_delta(
+    config,
+    before,
+    *,
+    load_channel,
+    local_label,
+    remote_label,
+    expected_local_delta,
+    expected_remote_delta,
+    channel_description,
+    interval=0.5,
+):
+    """Wait for a pinned LND channel to expose its settled target balances."""
+
+    channel_point = before["channel_point"]
+    expected_local = before[local_label] + expected_local_delta
+    expected_remote = before[remote_label] + expected_remote_delta
+    deadline = time.monotonic() + config.wait_timeout
+    last = None
+    last_pending = None
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            channel = load_channel(config)
+            last = lnd_channel_balance_snapshot(
+                channel,
+                local_label,
+                remote_label,
+            )
+            last_pending = channel.get("pending_htlcs") or []
+            last_error = None
+        except pytest.fail.Exception as exc:
+            last_error = str(exc)
+            time.sleep(interval)
+            continue
+        except Exception as exc:  # listchannels is a read-only query.
+            last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(interval)
+            continue
+        if (
+            last["channel_point"] == channel_point
+            and not last_pending
+            and last[local_label] == expected_local
+            and last[remote_label] == expected_remote
+        ):
+            return last
+        time.sleep(interval)
+    raise AssertionError(
+        f"timed out waiting for {channel_description} balance update: "
+        f"channel_point={channel_point}, {local_label}={expected_local}, "
+        f"{remote_label}={expected_remote}, pending_htlcs={last_pending}, "
+        f"last={last}, last_error={last_error}"
+    )
+
+
 def tlc_status_name(tlc: dict) -> str:
     status = tlc.get("status")
     if isinstance(status, dict) and len(status) == 1:
@@ -695,24 +783,31 @@ def active_fiber_tlcs(channel: dict) -> list[dict]:
 
 def lnd_balances(config: FiberSwapSmokeConfig):
     channel = wait_lnd_channel_quiescent(config)
-    local = int(channel["local_balance"])
-    remote = int(channel["remote_balance"])
-    local_reserve = int(channel.get("local_chan_reserve_sat") or 0)
-    remote_reserve = int(channel.get("remote_chan_reserve_sat") or 0)
-    balances = {
-        "chan_id": str(channel.get("chan_id", "")),
-        "channel_point": channel["channel_point"],
-        "lnd-d": local,
-        "FiberSwap CCH LND": remote,
-        "lnd-d spendable": max(0, local - local_reserve),
-        "FiberSwap CCH LND spendable": max(0, remote - remote_reserve),
-    }
-    # Preserve field absence so legacy lncli output can fall back to the
-    # decimal chan_id. An injected empty scid would incorrectly select the
-    # modern field and make lnd_outgoing_chan_id() fail.
-    if "scid" in channel:
-        balances["scid"] = str(channel["scid"])
-    return balances
+    return lnd_channel_balance_snapshot(
+        channel,
+        "lnd-d",
+        "FiberSwap CCH LND",
+    )
+
+
+def wait_lnd_balance_delta(
+    config,
+    before,
+    expected_lnd_d_delta,
+    expected_fiber_swap_delta,
+    interval=0.5,
+):
+    return wait_lnd_balance_snapshot_delta(
+        config,
+        before,
+        load_channel=get_lnd_channel,
+        local_label="lnd-d",
+        remote_label="FiberSwap CCH LND",
+        expected_local_delta=expected_lnd_d_delta,
+        expected_remote_delta=expected_fiber_swap_delta,
+        channel_description="lnd-d/FiberSwap CCH LND channel",
+        interval=interval,
+    )
 
 
 def get_fiber_channel(config: FiberSwapSmokeConfig):
@@ -995,8 +1090,8 @@ def print_flow_1_summary(
         "direct lnd-d ↔ FiberSwap CCH LND channel, no intermediary"
     )
     print(
-        "  - Fiber route fee     : paid by the FiberSwap CCH service through "
-        "its FNN; amount is not exposed by the external API"
+        "  - Fiber route fee     : amount not exposed by the external API; "
+        "paid by the FiberSwap CCH service through its FNN"
     )
     print_balance_table("LND channel", "sats", lnd_before, lnd_after)
     print_balance_table("Fiber channel", "raw cWBTC", fiber_before, fiber_after)
@@ -1089,26 +1184,29 @@ def verify_settled_invoice_channel(
     lnd_invoice: dict,
     target_route_ids: set[str],
     expected_sats: int,
+    channel_description: str = "configured direct FiberSwap CCH LND channel",
+    lnd_label: str = "lnd-d",
 ):
     settled_htlcs = [
         htlc
         for htlc in lnd_invoice.get("htlcs", [])
         if htlc.get("state") == "SETTLED"
     ]
-    assert settled_htlcs, f"lnd-d invoice has no settled HTLC: {lnd_invoice}"
+    assert settled_htlcs, (
+        f"{lnd_label} invoice has no settled HTLC: {lnd_invoice}"
+    )
     wrong_channel_htlcs = [
         htlc
         for htlc in settled_htlcs
         if str(htlc.get("chan_id")) not in target_route_ids
     ]
     assert not wrong_channel_htlcs, (
-        "lnd-d invoice used a channel other than the configured direct "
-        "FiberSwap CCH LND channel: "
+        f"LND invoice used a channel other than the {channel_description}: "
         f"route_ids={sorted(target_route_ids)}, htlcs={wrong_channel_htlcs}"
     )
     settled_msat = sum(int(htlc.get("amt_msat", "0")) for htlc in settled_htlcs)
     assert settled_msat == expected_sats * 1000, (
-        "lnd-d invoice settled amount on the configured channel is wrong: "
+        f"{lnd_label} invoice settled amount on the configured channel is wrong: "
         f"{settled_msat} msat != {expected_sats * 1000} msat"
     )
 
@@ -1189,7 +1287,12 @@ def run_flow_1_btc_to_cwbtc(config: FiberSwapSmokeConfig):
     wait_fiber_invoice_paid(config, payment_hash)
 
     fiber_after = fiber_balances(config)
-    lnd_after = lnd_balances(config)
+    lnd_after = wait_lnd_balance_delta(
+        config,
+        lnd_before,
+        -lnd_outflow,
+        lnd_outflow,
+    )
     assert_balance_delta(
         "FLOW 1 fiber2",
         fiber_before["fiber2"],
@@ -1235,6 +1338,8 @@ def run_flow_1_btc_to_cwbtc(config: FiberSwapSmokeConfig):
         "principal": principal,
         "cch_fee": cch_fee,
         "lnd_outflow": lnd_outflow,
+        "lightning_route_fee": lightning_route_fee,
+        "fiber_route_fee": None,
         "fiber_before": fiber_before,
         "fiber_after": fiber_after,
         "lnd_before": lnd_before,
@@ -1329,7 +1434,12 @@ def run_flow_2_cwbtc_to_btc(config: FiberSwapSmokeConfig, flow_1: dict):
     verify_settled_invoice_channel(lnd_invoice, target_route_ids, btc_principal)
 
     fiber_after = fiber_balances(config)
-    lnd_after = lnd_balances(config)
+    lnd_after = wait_lnd_balance_delta(
+        config,
+        lnd_before,
+        btc_principal,
+        -btc_principal,
+    )
     fiber_total = fiber_invoice_amount + fiber_route_fee
     assert_balance_delta(
         "FLOW 2 fiber2",
@@ -1380,13 +1490,66 @@ def run_flow_2_cwbtc_to_btc(config: FiberSwapSmokeConfig, flow_1: dict):
         "btc_principal": btc_principal,
         "cch_fee": cch_fee,
         "fiber_route_fee": fiber_route_fee,
+        "lightning_route_fee": 0,
         "fiber_total": fiber_total,
         "fiber_after": fiber_after,
         "lnd_after": lnd_after,
     }
 
 
+def build_fiber_swap_smoke_report(duration_seconds, flow_1, flow_2):
+    fiber2_net = (
+        flow_2["fiber_after"]["fiber2"] - flow_1["fiber_before"]["fiber2"]
+    )
+    lnd_d_net = flow_2["lnd_after"]["lnd-d"] - flow_1["lnd_before"]["lnd-d"]
+    flow_1_fiber_fee = (
+        "not exposed"
+        if flow_1["fiber_route_fee"] is None
+        else f"{flow_1['fiber_route_fee']:,} raw cWBTC"
+    )
+    return {
+        "duration_seconds": round(duration_seconds, 2),
+        "topology": (
+            "lnd-d ↔ FiberSwap CCH LND; "
+            "fiber2 ↔ Bottle ↔ FiberSwap CCH FNN"
+        ),
+        "flows": [
+            {
+                "direction": "BTC → cWBTC",
+                "paid": f"lnd-d paid {flow_1['lnd_outflow']:,} sats",
+                "received": (
+                    f"fiber2 received {flow_1['principal']:,} raw cWBTC"
+                ),
+            },
+            {
+                "direction": "cWBTC → BTC",
+                "paid": f"fiber2 paid {flow_2['fiber_total']:,} raw cWBTC",
+                "received": f"lnd-d received {flow_2['btc_principal']:,} sats",
+            },
+        ],
+        "fees": {
+            "CCH": (
+                f"{flow_1['cch_fee']:,} sats + "
+                f"{flow_2['cch_fee']:,} raw cWBTC"
+            ),
+            "Lightning": (
+                f"FLOW 1 {flow_1['lightning_route_fee']:,} sats; "
+                f"FLOW 2 {flow_2['lightning_route_fee']:,} sats"
+            ),
+            "Fiber": (
+                f"FLOW 1 {flow_1_fiber_fee}; "
+                f"FLOW 2 {flow_2['fiber_route_fee']:,} raw cWBTC"
+            ),
+        },
+        "net": {
+            "fiber2": f"{fiber2_net:+,} raw cWBTC",
+            "lnd-d": f"{lnd_d_net:+,} sats",
+        },
+    }
+
+
 def test_fiber_swap_bidirectional():
+    started_at = time.monotonic()
     config = FiberSwapSmokeConfig.from_env()
 
     info = fiber_swap_lncli_json(config, ["getinfo"])
@@ -1419,3 +1582,10 @@ def test_fiber_swap_bidirectional():
         "(CCH service fees plus aggregate Fiber routing fee are real costs)"
     )
     print("=" * 100)
+    emit_smoke_report(
+        build_fiber_swap_smoke_report(
+            time.monotonic() - started_at,
+            flow_1,
+            flow_2,
+        )
+    )
