@@ -31,6 +31,7 @@ from test_fiber_swap_daily_smoke import (
     verify_settled_invoice_channel,
     verify_lnd_direct_payment,
     wait_flow_2_success,
+    wait_lnd_balance_delta,
     wait_terminal_status,
 )
 
@@ -441,6 +442,44 @@ def test_lnd_balances_preserves_missing_legacy_scid(monkeypatch):
     assert lnd_outgoing_chan_id(balances) == "123"
 
 
+def test_direct_lnd_balance_wait_retries_stale_and_pending_snapshots(monkeypatch):
+    config = SimpleNamespace(wait_timeout=1)
+    before = {
+        "channel_point": "funding:0",
+        "lnd-d": 1_000,
+        "FiberSwap CCH LND": 500,
+    }
+    snapshots = iter(
+        [
+            {
+                "channel_point": "funding:0",
+                "local_balance": "1000",
+                "remote_balance": "500",
+                "pending_htlcs": [],
+            },
+            {
+                "channel_point": "funding:0",
+                "local_balance": "800",
+                "remote_balance": "700",
+                "pending_htlcs": [{"incoming": False}],
+            },
+            {
+                "channel_point": "funding:0",
+                "local_balance": "800",
+                "remote_balance": "700",
+                "pending_htlcs": [],
+            },
+        ]
+    )
+    monkeypatch.setattr(smoke, "get_lnd_channel", lambda _config: next(snapshots))
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+
+    result = wait_lnd_balance_delta(config, before, -200, 200)
+
+    assert result["lnd-d"] == 800
+    assert result["FiberSwap CCH LND"] == 700
+
+
 @pytest.mark.parametrize("bad_scid", ["", "0", "not-a-scid", str(2**64)])
 def test_lnd_outgoing_chan_id_fails_closed_on_invalid_scid(bad_scid):
     with pytest.raises(AssertionError, match="valid decimal scid"):
@@ -476,6 +515,34 @@ def test_flow_2_polling_reports_order_failure_without_waiting_for_fiber(
 
     with pytest.raises(AssertionError, match="terminal failure"):
         wait_flow_2_success(config, "0x01", 100)
+
+
+def test_flow_2_paid_amount_error_uses_configured_lnd_label(monkeypatch):
+    config = SimpleNamespace(wait_timeout=0.1)
+    monkeypatch.setattr(
+        smoke,
+        "fiber_swap_fnn",
+        lambda *_args, **_kwargs: {
+            "status": "Success",
+            "failed_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        smoke,
+        "api_json",
+        lambda *_args, **_kwargs: {"status": "Success"},
+    )
+    monkeypatch.setattr(
+        smoke,
+        "fiber_swap_lncli_json",
+        lambda *_args, **_kwargs: {
+            "state": "SETTLED",
+            "amt_paid_sat": "99",
+        },
+    )
+
+    with pytest.raises(AssertionError, match="lnd-c invoice paid amount mismatch"):
+        wait_flow_2_success(config, "0x01", 100, lnd_label="lnd-c")
 
 
 def test_direct_lnd_payment_requires_one_hop_and_zero_route_fee(monkeypatch):
@@ -525,6 +592,35 @@ def test_settled_lnd_invoice_requires_full_principal_amount():
 
     with pytest.raises(AssertionError, match="settled amount"):
         verify_settled_invoice_channel(invoice, {"123"}, 100)
+
+
+@pytest.mark.parametrize(
+    ("invoice", "message"),
+    [
+        ({"htlcs": []}, "lnd-c invoice has no settled HTLC"),
+        (
+            {
+                "htlcs": [
+                    {
+                        "state": "SETTLED",
+                        "chan_id": "123",
+                        "amt_msat": "99000",
+                    }
+                ]
+            },
+            "lnd-c invoice settled amount",
+        ),
+    ],
+)
+def test_settled_lnd_invoice_errors_use_configured_lnd_label(invoice, message):
+    with pytest.raises(AssertionError, match=message):
+        verify_settled_invoice_channel(
+            invoice,
+            {"123"},
+            100,
+            channel_description="configured relay channel",
+            lnd_label="lnd-c",
+        )
 
 
 def test_flow_summaries_explain_paths_balances_and_fee_owners(capsys):
@@ -577,6 +673,7 @@ def test_flow_summaries_explain_paths_balances_and_fee_owners(capsys):
     assert "lnd-d paid 200 sats" in output
     assert "received by the FiberSwap CCH service" in output
     assert "Lightning route fee : 0 sats" in output
+    assert "Fiber route fee     : amount not exposed by the external API" in output
     assert " FLOW 1 COMPLETE ".center(100, "─") in output
     assert " FLOW 2 · cWBTC → BTC ".center(100, "═") in output
     assert "fiber2 --cWBTC--> Bottle (Fiber trampoline) --cWBTC-->" in output

@@ -1,11 +1,13 @@
 # CCH Daily Smoke
 
 独立 smoke 项目，用于每日验证已部署 testnet 环境里的 CCH 主流程。每日 workflow
-会运行两组互不替代的 live test：
+会运行三组互不替代的 live test：
 
 - 原有本地 CCH：`fiber1/CCH + lnd-a + lnd-b`。
-- FiberSwap：`fiber2 + Bottle (Fiber trampoline) + FiberSwap FNN
+- FiberSwap 直连：`fiber2 + Bottle (Fiber trampoline) + FiberSwap FNN
   (CCH node) + FiberSwap CCH LND + lnd-d`。
+- FiberSwap 经中继 LND：Fiber 侧相同，Lightning 侧使用
+  `lnd-c ↔ relay LND ↔ FiberSwap CCH LND`。
 
 > 本 Demo 按 `1 sat BTC = 1 raw cWBTC` 计价（即 `1 BTC = 1 cWBTC`）。
 
@@ -37,6 +39,21 @@ CCH action      : CCH 通过 FNN 收到 cWBTC 后，通知它的 LND 支付 BTC
 BTC / Lightning : FiberSwap CCH LND → lnd-d
 ```
 
+workflow 还会运行一组独立的 relay-LND 变体。CCH/Fiber 侧逻辑保持不变，
+Lightning 资金路径改为：
+
+```text
+FLOW 1: lnd-c → relay LND → FiberSwap CCH LND
+FLOW 2: FiberSwap CCH LND → relay LND → lnd-c
+```
+
+relay 测试会锁定 `lnd-c ↔ relay LND` channel point 和
+`relay LND ↔ FiberSwap CCH LND` SCID，并校验实际两跳路径。FLOW 2 使用
+`--private` 和 `86400` 秒 expiry 创建 `lnd-c` invoice；invoice route hint 必须指向
+指定 relay LND 且包含非零转发费，从而覆盖 FNN v0.9+ 的 CCH Lightning 路由费流程。
+日志会显示 route hint 中最后一跳要求的费用；FiberSwap CCH LND 实际支付的整条
+Lightning 路由总费用未由外部 API 暴露。
+
 这里的 `CCH action` 是两笔支付的协调边界，不是 LND 与 FNN 之间的一条资金通道；
 BTC 不会直接变成 FNN 数据，cWBTC 也不会直接进入 LND。
 
@@ -44,7 +61,7 @@ BTC 不会直接变成 FNN 数据，cWBTC 也不会直接进入 LND。
 
 | FLOW | 谁花钱 | 谁收到本金 | 手续费归属 |
 | --- | --- | --- | --- |
-| FLOW 1（BTC → cWBTC） | `lnd-d` 支付 BTC 本金和 CCH fee | `fiber2` 收到 cWBTC 本金 | FiberSwap CCH 收取 CCH fee；FiberSwap 服务支付其 FNN 发出 cWBTC 时产生的 Fiber 路由费；`lnd-d` 与 FiberSwap CCH LND 是直连通道，所以 Lightning 路由费应为 0 |
+| FLOW 1（BTC → cWBTC） | `lnd-d` 支付 BTC 本金和 CCH fee | `fiber2` 收到 cWBTC 本金 | FiberSwap CCH 收取 CCH fee；FiberSwap 服务支付其 FNN 发出 cWBTC 时产生的 Fiber 路由费，但外部 API 不提供该费用的具体金额；`lnd-d` 与 FiberSwap CCH LND 是直连通道，所以 Lightning 路由费应为 0 |
 | FLOW 2（cWBTC → BTC） | `fiber2` 支付 cWBTC 本金、CCH fee 和 Fiber 路由费 | `lnd-d` 收到 BTC 本金 | FiberSwap CCH 收取 CCH fee；Bottle (Fiber trampoline) 是首个 Fiber trampoline hop，FNN 只返回整条 Fiber 路由的聚合费用，不提供各节点最终分配；直连 Lightning 路由费应为 0 |
 
 当前测试从“FLOW 1 让 `fiber2` 收到 100 raw cWBTC”开始，Demo 中
@@ -111,6 +128,9 @@ FiberSwap live test 还要求 runner 能通过 HTTPS 访问
   FiberSwap CCH LND。
 - self-hosted runner 可以访问本机 Fiber RPC、Docker 中的 `lnd-d`，以及外部
   FiberSwap HTTPS API。
+- relay-LND 变体还要求 runner 能执行 Docker 中的 `lnd-c`；
+  `lnd-c ↔ relay LND` 通道必须 active 且两端都有可用余额，relay LND 与
+  FiberSwap CCH LND 的公有通道必须在图中启用。
 
 cWBTC:
 
@@ -151,6 +171,13 @@ workflow 会固定下面这些值，以保证测试命中刚刚验证过的节�
 | `CCH_FIBER_SWAP_LND_CHANNEL_POINT` | `70fdfd0d…f37c35:1` | 唯一允许使用的 `lnd-d ↔ FiberSwap CCH LND` 私有通道 outpoint |
 | `CCH_FIBER_SWAP_BOTTLE_PUBKEY` | `02b6d4e3…02be71` | Bottle (Fiber trampoline) 的公钥 |
 | `CCH_FIBER_SWAP_FIBER_CHANNEL_ID` | `0x4b6513e2…ed5536` | `fiber2 ↔ Bottle (Fiber trampoline)` cWBTC 通道 |
+| `CCH_FIBER_SWAP_RELAY_SMOKE_ENABLED` | relay workflow step 中为 `1` | 明确启用 relay-LND live test |
+| `CCH_FIBER_SWAP_RELAY_LND_CONTAINER` | `lnd-c` | relay 测试使用的本地付款/收款 LND 容器 |
+| `CCH_FIBER_SWAP_RELAY_LOCAL_LND_PUBKEY` | unset | 可选的 `lnd-c` 身份公钥固定值；未设置时使用 `getinfo` 返回值 |
+| `CCH_FIBER_SWAP_RELAY_NODE_PUBKEY` | `03676dd4…70a41` | 公共 relay LND 身份公钥 |
+| `CCH_FIBER_SWAP_RELAY_CHANNEL_POINT` | `0cedcc72…5408e:1` | 唯一允许使用的 `lnd-c ↔ relay LND` 通道 outpoint |
+| `CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID` | `5637388530143199233` | 唯一允许使用的 `relay LND ↔ FiberSwap CCH LND` 公有通道 SCID |
+| `CCH_FIBER_SWAP_RELAY_LND_FEE_LIMIT_SATS` | `80` | FLOW 1 两跳 Lightning 支付允许的路由费上限 |
 
 公钥和 channel id 在实际 workflow 中保存完整值；上表为了可读性只缩写了较长的值。
 测试会从 `CCH_FIBER_SWAP_LND_CHANNEL_POINT` 对应的 active 通道读取真实 `scid`，并用
@@ -201,6 +228,31 @@ CCH_FIBER_SWAP_BOTTLE_PUBKEY=02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90a
 CCH_FIBER_SWAP_FIBER_CHANNEL_ID=0x4b6513e2d1ad8341366d3b0733f00306aee7e2db21e669a30aba5d33a1ed5536 \
 python -m pytest -vv -s \
   tests/test_fiber_swap_daily_smoke.py::test_fiber_swap_bidirectional
+
+rm -f -- "$CCH_FNN_AUTH_FILE"
+```
+
+在同一台 `test-new-02` runner 上只运行 relay-LND 变体时，先执行上面的 auth 文件
+准备部分（测试结束后再删除），然后运行：
+
+```bash
+CCH_FIBER_SWAP_RELAY_SMOKE_ENABLED=1 \
+CCH_FIBER_SWAP_FNN_CLI=/home/ckb/fiber-test/testnet/node1/fnn-cli \
+CCH_FIBER_SWAP_F2_RPC=http://127.0.0.1:8229 \
+CCH_FIBER_SWAP_FNN_AUTH_TOKEN_FILE="$CCH_FNN_AUTH_FILE" \
+CCH_FIBER_SWAP_API_BASE_URL=https://fiber-swap-api.retric.uk \
+CCH_FIBER_SWAP_LND_DIR=/data/.lnd \
+CCH_FIBER_SWAP_LND_NETWORK=testnet \
+CCH_FIBER_SWAP_LND_REMOTE_PUBKEY=03c7796e27b079b25ea5c9f02dbb289ab1720248ecdd25dceed7cd489f2fe6290d \
+CCH_FIBER_SWAP_BOTTLE_PUBKEY=02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71 \
+CCH_FIBER_SWAP_FIBER_CHANNEL_ID=0x4b6513e2d1ad8341366d3b0733f00306aee7e2db21e669a30aba5d33a1ed5536 \
+CCH_FIBER_SWAP_RELAY_LND_CONTAINER=lnd-c \
+CCH_FIBER_SWAP_RELAY_NODE_PUBKEY=03676dd479c6c5422bdcec4691f42f1a6c6b386519b431542e03f31e773d570a41 \
+CCH_FIBER_SWAP_RELAY_CHANNEL_POINT=0cedcc728ba1a51582c6650fc14f1a862912ee4ea400a94049c83326b7e5408e:1 \
+CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID=5637388530143199233 \
+CCH_FIBER_SWAP_RELAY_LND_FEE_LIMIT_SATS=80 \
+python -m pytest -vv -s \
+  tests/test_fiber_swap_relay_daily_smoke.py::test_fiber_swap_via_relay_lnd_bidirectional
 
 rm -f -- "$CCH_FNN_AUTH_FILE"
 ```
@@ -321,6 +373,9 @@ write("cch");
   Before/After/Change。
 - FLOW 2 向 `lnd-d` 回补 FLOW 1 的实际总支出；整轮结束后指定 LND 通道的
   local/remote 本金回到测试前水平。
+- relay-LND 变体要求 FLOW 1 的实际成功路径严格为
+  `lnd-c → relay LND → FiberSwap CCH LND`，FLOW 2 的 private invoice hint 和
+  settled HTLC 严格命中 `lnd-c ↔ relay LND` 通道；整轮同样恢复该通道的本金。
 
 ## 稳定性测试
 
