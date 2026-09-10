@@ -2,7 +2,7 @@ name: cch daily smoke
 
 on:
   schedule:
-    - cron: "0 2 * * *" # 10:00 Asia/Shanghai
+    - cron: "17 2 * * *" # 10:17 Asia/Shanghai; avoid top-of-hour scheduler load
   workflow_dispatch:
     inputs:
       fiber_source:
