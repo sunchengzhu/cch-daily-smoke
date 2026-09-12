@@ -5,17 +5,25 @@
 boot. The dispatch state prevents additional requests once GitHub has accepted
 the day's request. The 10:17 GitHub schedule is an independent, best-effort fallback.
 
+Deployment status (2026-09-12): the units are installed but the timer is paused.
+The server's pre-existing GitHub login has read-only repository access and dispatch
+returns HTTP 403. Configure the dedicated credential below before enabling it.
+The GitHub fallback is enabled; the workstation Codex automation is paused.
+
 ## Deployment
 
 The runner account must be `ckb`, with Python 3.9+, GitHub CLI, synchronized time,
-systemd, and non-interactive sudo. Its existing `gh` login must be able to dispatch
-this repository's workflow. For a new credential, use a fine-grained token limited
-to this repository with Actions write access. Authenticate on the server; do not
-copy a personal workstation token or retain a job's temporary `GITHUB_TOKEN`.
+systemd, and non-interactive sudo. Create a fine-grained token limited to
+`sunchengzhu/cch-daily-smoke` with Actions read/write access and save it as repository
+secret `CCH_SMOKE_DISPATCH_TOKEN`. The installer places it in a `ckb`-owned 0600
+file outside the checkout; only the GitHub CLI subprocess receives it. Never put
+the token in a commit, workflow input or chat, or retain a job's temporary token.
 
 From GitHub Actions, run **cch scheduler administration** with operation `check`
-for a read-only preflight. Operation `install` installs the repository's script
-and units, enables the timer and starts its service once to validate dispatch.
+for a read-only preflight. Once the secret is configured, operation `verify-dispatch`
+confirms write permission by dispatching today's dated run after 10:00 Beijing
+(at most once enters smoke). Then operation `install` installs the repository's script and units,
+enables the timer and starts its service once to validate dispatch.
 After 10:00, this validation can trigger today's smoke if it has not been claimed.
 The installation does not modify FNN services or their data.
 
@@ -25,10 +33,18 @@ Alternatively, on `test-new-02`, as `ckb`, from a checkout of `main`:
 bash scripts/install_daily_smoke_timer.sh
 ```
 
+Direct installation needs `CCH_SMOKE_DISPATCH_TOKEN` in the environment or the
+credential file already installed. Token expiry/revocation requires updating the
+repository secret and running `install` again; it does not alter the account's
+global GitHub CLI login. The script also supports an existing `gh` login when no
+`CCH_SMOKE_DISPATCH_TOKEN_FILE` is configured, but the deployed service explicitly
+uses the dedicated file.
+
 The installed script is independent of the Actions checkout:
 
 - `/usr/local/lib/cch-daily-smoke/dispatch_daily_smoke.py`: installed dispatcher.
 - `/var/lib/cch-daily-smoke-dispatch/`: persistent request state and lock.
+- `/var/lib/cch-daily-smoke-dispatch/github-token`: private credential, never log it.
 - `/home/ckb/.local/state/cch-daily-smoke/executions/`: shared execution claims.
 - `/etc/systemd/system/cch-daily-smoke-dispatch.{service,timer}`: systemd units.
 
@@ -56,7 +72,8 @@ this runner, so a long stability job can delay the smoke even after prompt dispa
 systemctl list-timers cch-daily-smoke-dispatch.timer --all
 systemctl status cch-daily-smoke-dispatch.service
 journalctl -u cch-daily-smoke-dispatch.service --since today
-python3 /usr/local/lib/cch-daily-smoke/dispatch_daily_smoke.py --check
+CCH_SMOKE_DISPATCH_TOKEN_FILE=/var/lib/cch-daily-smoke-dispatch/github-token \
+  python3 /usr/local/lib/cch-daily-smoke/dispatch_daily_smoke.py --check
 gh run list --repo sunchengzhu/cch-daily-smoke --workflow cch-daily-smoke.yml
 ```
 
@@ -74,3 +91,5 @@ sudo systemctl disable --now cch-daily-smoke-dispatch.timer
 This stops the new dispatcher. Leave the state files intact; the GitHub fallback
 remains enabled and skips a day already claimed. A repository rollback that
 removes the execution gate must be coordinated with stopping the timer first.
+The administration workflow's `pause` operation provides the same timer stop
+without requiring SSH.

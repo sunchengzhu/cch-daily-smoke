@@ -8,6 +8,8 @@ Type=oneshot
 User=ckb
 Group=ckb
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/ckb/.local/bin
+Environment=CCH_SMOKE_DISPATCH_TOKEN_FILE=/var/lib/cch-daily-smoke-dispatch/github-token
+UnsetEnvironment=GH_TOKEN GITHUB_TOKEN CCH_SMOKE_DISPATCH_TOKEN
 StateDirectory=cch-daily-smoke-dispatch
 StateDirectoryMode=0700
 ExecStart=/usr/bin/python3 /usr/local/lib/cch-daily-smoke/dispatch_daily_smoke.py

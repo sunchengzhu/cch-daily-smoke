@@ -3,6 +3,7 @@ import fcntl
 import json
 import subprocess
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -17,13 +18,15 @@ DAY = "2026-09-12"
 def github(monkeypatch):
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("CCH_SMOKE_DISPATCH_TOKEN_FILE", raising=False)
     monkeypatch.setattr(dispatch.shutil, "which", lambda name: "/usr/bin/gh")
-    api = SimpleNamespace(calls=[], runs=[], pages=None, response={"workflow_run_id": 123},
+    api = SimpleNamespace(calls=[], environments=[], runs=[], pages=None, response={"workflow_run_id": 123},
                           post_error=None, before_post=None)
 
     def run(command, **kwargs):
         payload = json.loads(kwargs["input"]) if kwargs.get("input") else None
         api.calls.append((command, payload))
+        api.environments.append(kwargs["env"])
         if payload is not None:
             if api.before_post:
                 api.before_post()
@@ -87,6 +90,17 @@ def test_pagination_checks_later_pages(github, tmp_path):
     github.pages = [{"workflow_runs": []}, {"workflow_runs": [daily_run()]}]
     assert "Existing daily run 42" in dispatch.dispatch(tmp_path, now=NOW)
     assert not posts(github)
+
+
+def test_daily_lookup_excludes_runs_created_before_ten(github):
+    assert dispatch.find_daily_run(NOW.date()) is None
+    command, payload = github.calls[0]
+    endpoint = next(arg for arg in command if arg.startswith(f"{dispatch.ENDPOINT}/runs?"))
+    query = parse_qs(urlsplit(endpoint).query)
+    assert query["created"] == [">=2026-09-12T02:00:00Z"]
+    assert query["branch"] == ["main"]
+    assert query["event"] == ["workflow_dispatch"]
+    assert payload is None
 
 
 def test_failed_lookup_does_not_create_pending_or_dispatch(github, tmp_path, monkeypatch):
@@ -169,3 +183,74 @@ def test_missing_gh_and_missing_login_fail_explicitly(github, monkeypatch):
     monkeypatch.setattr(dispatch.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=4))
     with pytest.raises(RuntimeError, match="check server gh auth"):
         dispatch.gh_api(dispatch.ENDPOINT)
+
+
+def configured_token(monkeypatch, tmp_path, content="dedicated-fake-token"):
+    token_file = tmp_path / "github-token"
+    token_file.write_text(content)
+    token_file.chmod(0o600)
+    monkeypatch.setenv("CCH_SMOKE_DISPATCH_TOKEN_FILE", str(token_file))
+    return token_file
+
+
+def test_token_file_is_only_passed_in_child_environment(github, monkeypatch, tmp_path):
+    configured_token(monkeypatch, tmp_path)
+    monkeypatch.setenv("GH_TOKEN", "inherited-fake-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "temporary-fake-job-token")
+    dispatch.dispatch(tmp_path / "state", now=NOW)
+    assert all(env["GH_TOKEN"] == "dedicated-fake-token" for env in github.environments)
+    assert all("GITHUB_TOKEN" not in env for env in github.environments)
+    assert "dedicated-fake-token" not in repr(github.calls)
+    assert dispatch.os.environ["GH_TOKEN"] == "inherited-fake-token"
+    assert "dedicated-fake-token" not in (tmp_path / "state" / f"{DAY}.json").read_text()
+
+
+def test_check_uses_configured_token_identity_without_post(github, monkeypatch, tmp_path):
+    configured_token(monkeypatch, tmp_path)
+    dispatch.main(["--check"])
+    assert github.environments[0]["GH_TOKEN"] == "dedicated-fake-token"
+    assert not posts(github)
+
+
+@pytest.mark.parametrize("content", ["", " \n"])
+def test_empty_token_file_fails_before_api_call(github, monkeypatch, tmp_path, content):
+    configured_token(monkeypatch, tmp_path, content)
+    with pytest.raises(RuntimeError, match="TOKEN_FILE is empty"):
+        dispatch.gh_api(dispatch.ENDPOINT)
+    assert not github.calls
+
+
+def test_token_file_permissions_must_be_private(github, monkeypatch, tmp_path):
+    token_file = configured_token(monkeypatch, tmp_path)
+    token_file.chmod(0o644)
+    with pytest.raises(RuntimeError, match="permissions 0600"):
+        dispatch.gh_api(dispatch.ENDPOINT)
+    assert not github.calls
+
+
+def test_missing_or_unreadable_token_file_fails_closed(github, monkeypatch, tmp_path):
+    token_file = configured_token(monkeypatch, tmp_path)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("sensitive-details-must-not-appear")
+
+    monkeypatch.setattr(type(token_file), "read_text", denied)
+    with pytest.raises(RuntimeError, match="Cannot read.*PermissionError") as error:
+        dispatch.gh_api(dispatch.ENDPOINT)
+    assert "sensitive-details" not in str(error.value)
+    monkeypatch.setenv("CCH_SMOKE_DISPATCH_TOKEN_FILE", str(tmp_path / "missing"))
+    with pytest.raises(RuntimeError, match="Cannot read.*FileNotFoundError"):
+        dispatch.gh_api(dispatch.ENDPOINT)
+    assert not github.calls
+
+
+@pytest.mark.parametrize("payload, method", [(None, "GET"), ({"ref": "main"}, "POST")])
+def test_api_error_only_exposes_status_not_sensitive_stderr(github, monkeypatch, payload, method):
+    result = SimpleNamespace(returncode=1, stdout="secret-response", stderr=
+                             "gh: secret-auth-value (HTTP 403) Authorization: Bearer do-not-print")
+    monkeypatch.setattr(dispatch.subprocess, "run", lambda *args, **kwargs: result)
+    with pytest.raises(RuntimeError) as error:
+        dispatch.gh_api(dispatch.ENDPOINT, payload=payload)
+    assert str(error.value) == (
+        f"GitHub API {method} failed (HTTP 403, gh exit 1); check server gh auth and connectivity."
+    )

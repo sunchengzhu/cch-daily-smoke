@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Read-only preflight, or install and verify the server timer"
+        description: "Check, verify dispatch permission, install, or pause the server timer"
         type: choice
         default: check
         options:
           - check
           - install
           - verify-dispatch
+          - pause
 
 permissions:
   contents: read
@@ -63,15 +64,34 @@ jobs:
 
       - name: Install and verify the server timer
         if: ${{ inputs.operation == 'install' }}
+        env:
+          CCH_SMOKE_DISPATCH_TOKEN: ${{ secrets.CCH_SMOKE_DISPATCH_TOKEN }}
         run: bash scripts/install_daily_smoke_timer.sh
 
-      - name: Explicitly verify dispatch using the server login
+      - name: Explicitly verify dispatch permission
         if: ${{ inputs.operation == 'verify-dispatch' }}
+        env:
+          DISPATCH_TOKEN: ${{ secrets.CCH_SMOKE_DISPATCH_TOKEN }}
         run: |
-          env -u GH_TOKEN -u GITHUB_TOKEN gh workflow run cch-daily-smoke.yml \
+          if [[ "$(TZ=Asia/Shanghai date +%H)" < "10" ]]; then
+            echo 'Verify after 10:00 Asia/Shanghai so the daily gate can execute the test.' >&2
+            exit 1
+          fi
+          unset GH_TOKEN GITHUB_TOKEN
+          if [[ -n "$DISPATCH_TOKEN" ]]; then
+            export GH_TOKEN="$DISPATCH_TOKEN"
+          fi
+          unset DISPATCH_TOKEN
+          gh workflow run cch-daily-smoke.yml \
             --repo sunchengzhu/cch-daily-smoke --ref main \
             --raw-field scheduled_date="$(TZ=Asia/Shanghai date +%F)" \
             --raw-field fiber_source=release --raw-field send_discord_report=true
+
+      - name: Pause the server timer
+        if: ${{ inputs.operation == 'pause' }}
+        run: |
+          sudo -n systemctl disable --now cch-daily-smoke-dispatch.timer
+          sudo -n systemctl stop cch-daily-smoke-dispatch.service
 
       - name: Read installed scheduler status
         if: ${{ always() }}

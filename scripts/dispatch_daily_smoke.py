@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dispatch one daily smoke using a server's existing GitHub CLI login.
+"""Dispatch daily smoke with a dedicated token file or the server's gh login.
 
 Keep --state-dir outside runner checkouts. An uncertain POST is never retried
 automatically: subsequent calls reconcile it against GitHub or require review.
@@ -11,7 +11,9 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from urllib.parse import urlencode
@@ -25,13 +27,34 @@ BEIJING = ZoneInfo("Asia/Shanghai")
 DEFAULT_STATE_DIR = Path("/var/lib/cch-daily-smoke-dispatch")
 
 
-def gh_api(endpoint, payload=None, paginate=False):
-    if any(os.environ.get(name) for name in ("GH_TOKEN", "GITHUB_TOKEN")):
+def gh_environment():
+    environment = os.environ.copy()
+    token_file = environment.get("CCH_SMOKE_DISPATCH_TOKEN_FILE")
+    if token_file:
+        try:
+            path = Path(token_file)
+            metadata = path.stat()
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise RuntimeError("CCH_SMOKE_DISPATCH_TOKEN_FILE must be a regular file with permissions 0600.")
+            token = path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError(f"Cannot read CCH_SMOKE_DISPATCH_TOKEN_FILE ({type(exc).__name__}).") from exc
+        if not token:
+            raise RuntimeError("CCH_SMOKE_DISPATCH_TOKEN_FILE is empty.")
+        environment["GH_TOKEN"] = token
+        environment.pop("GITHUB_TOKEN", None)
+    elif any(environment.get(name) for name in ("GH_TOKEN", "GITHUB_TOKEN")):
         raise RuntimeError("Unset GH_TOKEN/GITHUB_TOKEN; use the server's stored gh login.")
+    return environment
+
+
+def gh_api(endpoint, payload=None, paginate=False):
+    environment = gh_environment()
     if not shutil.which("gh"):
         raise RuntimeError("gh is not installed; install GitHub CLI and run gh auth login.")
+    method = "POST" if payload is not None else "GET"
     command = ["gh", "api", "--hostname", "github.com", "--method",
-               "POST" if payload is not None else "GET", endpoint,
+               method, endpoint,
                "-H", "X-GitHub-Api-Version: 2026-03-10"]
     if paginate:
         command.extend(["--paginate", "--slurp"])
@@ -39,16 +62,20 @@ def gh_api(endpoint, payload=None, paginate=False):
         command.extend(["--input", "-"])
     try:
         result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
-                                capture_output=True, text=True, timeout=60, check=False)
+                                capture_output=True, text=True, timeout=60, check=False, env=environment)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"GitHub API request did not complete ({type(exc).__name__}).") from exc
+        raise RuntimeError(f"GitHub API {method} did not complete ({type(exc).__name__}).") from exc
     if result.returncode:
-        raise RuntimeError(f"GitHub API request failed (gh exit {result.returncode}); check server gh auth and connectivity.")
+        status = re.search(r"\bHTTP(?:/\d(?:\.\d)?)?\s+([1-5]\d{2})\b", getattr(result, "stderr", ""))
+        http_status = f"HTTP {status[1]}, " if status else ""
+        raise RuntimeError(f"GitHub API {method} failed ({http_status}gh exit {result.returncode}); check server gh auth and connectivity.")
     return json.loads(result.stdout) if result.stdout.strip() else None
 
 
 def find_daily_run(day):
-    since = datetime.combine(day, time.min, BEIJING).astimezone(timezone.utc)
+    # An early dated verification run is skipped by the gate, so it must not
+    # suppress the real daily run once 10:00 arrives.
+    since = datetime.combine(day, time(hour=10), BEIJING).astimezone(timezone.utc)
     query = urlencode({"branch": "main", "event": "workflow_dispatch", "per_page": 100,
                        "created": ">=" + since.strftime("%Y-%m-%dT%H:%M:%SZ")})
     pages = gh_api(f"{ENDPOINT}/runs?{query}", paginate=True)
@@ -138,7 +165,7 @@ def main(argv=None):
             response = gh_api(f"{ENDPOINT}/runs?per_page=1")
             if not isinstance(response, dict) or not isinstance(response.get("workflow_runs"), list):
                 raise RuntimeError("Unexpected workflow-runs response.")
-            print("Preflight passed: gh login can read workflow runs; no dispatch sent. Write permission is not proven.")
+            print("Preflight passed: configured gh identity can read workflow runs; no dispatch sent. Write permission is not proven.")
         else:
             print(dispatch(args.state_dir, args.date))
     except (OSError, ValueError, RuntimeError) as exc:
