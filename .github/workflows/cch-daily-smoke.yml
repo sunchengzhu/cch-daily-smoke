@@ -1,8 +1,6 @@
 name: cch daily smoke
 
 on:
-  schedule:
-    - cron: "17 2 * * *" # 10:17 Asia/Shanghai; avoid top-of-hour scheduler load
   workflow_dispatch:
     inputs:
       fiber_source:
@@ -196,7 +194,7 @@ jobs:
   notify-discord:
     runs-on: ubuntu-22.04
     needs: cch-daily-smoke
-    if: ${{ always() && (github.event_name == 'schedule' || inputs.send_discord_report) }}
+    if: ${{ always() && inputs.send_discord_report }}
 
     steps:
       - uses: actions/checkout@v7

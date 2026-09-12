@@ -18,15 +18,13 @@ def update_fnn_text() -> str:
     return UPDATE_FNN.read_text(encoding="utf-8")
 
 
-def test_discord_report_runs_for_schedule_or_explicit_manual_preview():
+def test_discord_report_runs_for_explicit_dispatch_request():
     workflow = workflow_text()
 
     assert "send_discord_report:" in workflow
     assert "default: false" in workflow
-    assert (
-        "if: ${{ always() && (github.event_name == 'schedule' || "
-        "inputs.send_discord_report) }}" in workflow
-    )
+    assert "if: ${{ always() && inputs.send_discord_report }}" in workflow
+    assert "schedule:" not in workflow
     assert "needs.cch-daily-smoke.result == 'failure'" not in workflow
 
 
