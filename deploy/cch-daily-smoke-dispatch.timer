@@ -1,0 +1,13 @@
+[Unit]
+Description=Start CCH daily smoke at 10:00 Beijing time with catch-up checks
+
+[Timer]
+OnCalendar=*-*-* 10..23:0/5:00 Asia/Shanghai
+OnBootSec=2min
+Persistent=true
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=cch-daily-smoke-dispatch.service
+
+[Install]
+WantedBy=timers.target

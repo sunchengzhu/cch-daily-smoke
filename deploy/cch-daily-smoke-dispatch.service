@@ -1,0 +1,17 @@
+[Unit]
+Description=Dispatch the CCH daily smoke on GitHub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ckb
+Group=ckb
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/ckb/.local/bin
+StateDirectory=cch-daily-smoke-dispatch
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 /usr/local/lib/cch-daily-smoke/dispatch_daily_smoke.py
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

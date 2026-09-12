@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 import pytest
 
@@ -102,6 +103,71 @@ def test_first_attempt_uses_a_short_single_line_ref_summary():
     assert ref_line == "Branch `codex/report` · `0123456`"
     assert "attempt" not in ref_line
     assert "retry" not in ref_line
+
+
+@pytest.mark.parametrize(
+    ("started", "trigger", "expected"),
+    [
+        ("2026-09-12T07:10:03+00:00", "schedule", "15:10:03 CST · Delay 5h 10m 3s · GitHub fallback"),
+        ("2026-09-12T02:00:04+00:00", "workflow_dispatch", "10:00:04 CST · Delay 4s · workflow_dispatch/API"),
+        ("2026-09-12T01:59:59+00:00", "workflow_dispatch", "09:59:59 CST · Delay 0s · workflow_dispatch/API"),
+        ("2026-09-13T02:00:00+00:00", "schedule", "10:00:00 CST · Delay 24h 0m 0s · GitHub fallback"),
+    ],
+)
+def test_schedule_reports_beijing_start_and_nonnegative_delay(started, trigger, expected):
+    env = complete_env()
+    env.update({
+        "CCH_REPORT_SCHEDULED_DATE": "2026-09-12",
+        "CCH_REPORT_STARTED_AT": str(int(datetime.fromisoformat(started).timestamp())),
+        "CCH_REPORT_TRIGGER": trigger,
+    })
+
+    fields = fields_by_name(report.payload_from_env(env))
+
+    assert fields["Run overview"].splitlines()[-1] == (
+        "Scheduled 2026-09-12 10:00 CST · Actual start " + expected
+    )
+
+
+def test_absent_schedule_metadata_preserves_existing_overview():
+    overview = fields_by_name(report.payload_from_env(complete_env()))["Run overview"]
+
+    assert overview == (
+        "✅ **Passed** · ⏱ 2m 5s\n"
+        "Branch `codex/report` · `0123456` · retry `2`\n"
+        "Fiber source `release` · FNN `v0.9.0`\n"
+        "Package `fnn-v0.9.0-x86_64-linux.tar.gz`"
+    )
+
+
+@pytest.mark.parametrize(
+    ("day", "started"),
+    [
+        ("", "1789178400"), ("2026-09-12", ""),
+        ("2026-02-30", "1789178400"), ("20260912", "1789178400"),
+        ("2026-9-12", "1789178400"), (" 2026-09-12", "1789178400"),
+        ("0000-09-12", "1789178400"), ("2026-09-12", "nan"),
+        ("2026-09-12", "inf"), ("2026-09-12", "1789178400.5"),
+        ("2026-09-12", "-1"), ("2026-09-12", "999999999999"),
+        ("2026-09-12", "1" * 5000),
+    ],
+)
+def test_invalid_schedule_metadata_does_not_change_or_break_report(day, started):
+    env = complete_env()
+    baseline = report.payload_from_env(env)
+    env.update({"CCH_REPORT_SCHEDULED_DATE": day, "CCH_REPORT_STARTED_AT": started})
+
+    assert report.payload_from_env(env) == baseline
+
+
+def test_schedule_gate_failure_is_visible_before_other_preflight_steps():
+    env = complete_env()
+    env["CCH_REPORT_GATE_OUTCOME"] = "failure"
+
+    preflight = fields_by_name(report.payload_from_env(env))["Preflight"]
+
+    assert preflight.startswith("❌ Schedule gate · ✅ Checkout")
+    assert "All passed" not in preflight
 
 
 def test_preflight_keeps_per_stage_status_when_results_are_mixed():

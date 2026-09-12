@@ -1,8 +1,16 @@
 name: cch daily smoke
+run-name: ${{ inputs.scheduled_date && format('CCH daily smoke · {0}', inputs.scheduled_date) || (github.event_name == 'schedule' && 'CCH daily smoke · GitHub fallback' || 'CCH daily smoke · manual') }}
 
 on:
+  schedule:
+    - cron: "17 2 * * *" # 10:17 Asia/Shanghai; fallback for the server timer
   workflow_dispatch:
     inputs:
+      scheduled_date:
+        description: "Daily scheduler date in Asia/Shanghai (YYYY-MM-DD); leave empty for manual runs"
+        required: false
+        default: ""
+        type: string
       fiber_source:
         description: "Fiber package source"
         required: false
@@ -31,10 +39,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  daily-gate:
+    runs-on: [self-hosted, test-new-02]
+    timeout-minutes: 2
+    outputs:
+      should_run: ${{ steps.claim.outputs.should_run }}
+      scheduled_date: ${{ steps.claim.outputs.scheduled_date }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Claim the daily execution
+        id: claim
+        env:
+          SCHEDULED_DATE: ${{ inputs.scheduled_date || '' }}
+          FIBER_SOURCE: ${{ inputs.fiber_source || 'release' }}
+          FIBER_PR_NUMBER: ${{ inputs.fiber_pr_number || '' }}
+        run: python3 scripts/claim_daily_smoke.py
+
   cch-daily-smoke:
+    needs: daily-gate
+    if: ${{ needs.daily-gate.outputs.should_run == 'true' }}
     runs-on: [self-hosted, test-new-02]
     timeout-minutes: 30
     outputs:
+      started_at: ${{ steps.report_start.outputs.started_at }}
       duration_seconds: ${{ steps.report_metadata.outputs.duration_seconds }}
       fnn_version: ${{ steps.update_fnn.outputs.fnn_version }}
       fnn_package: ${{ steps.update_fnn.outputs.fnn_package }}
@@ -193,8 +222,8 @@ jobs:
 
   notify-discord:
     runs-on: ubuntu-22.04
-    needs: cch-daily-smoke
-    if: ${{ always() && inputs.send_discord_report }}
+    needs: [daily-gate, cch-daily-smoke]
+    if: ${{ always() && (github.event_name == 'schedule' || inputs.send_discord_report) && (needs.daily-gate.outputs.should_run == 'true' || needs.daily-gate.result == 'failure') }}
 
     steps:
       - uses: actions/checkout@v7
@@ -205,7 +234,11 @@ jobs:
         continue-on-error: true
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          CCH_REPORT_JOB_RESULT: ${{ needs.cch-daily-smoke.result }}
+          CCH_REPORT_JOB_RESULT: ${{ needs.daily-gate.result == 'failure' && 'failure' || needs.cch-daily-smoke.result }}
+          CCH_REPORT_GATE_OUTCOME: ${{ needs.daily-gate.result }}
+          CCH_REPORT_SCHEDULED_DATE: ${{ needs.daily-gate.outputs.scheduled_date }}
+          CCH_REPORT_STARTED_AT: ${{ needs.cch-daily-smoke.outputs.started_at }}
+          CCH_REPORT_TRIGGER: ${{ github.event_name }}
           CCH_REPORT_BRANCH: ${{ github.ref_name }}
           CCH_REPORT_FIBER_SOURCE: ${{ inputs.fiber_source || 'release' }}
           CCH_REPORT_FNN_VERSION: ${{ needs.cch-daily-smoke.outputs.fnn_version }}

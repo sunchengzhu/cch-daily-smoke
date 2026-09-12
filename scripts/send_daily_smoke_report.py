@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -90,6 +92,29 @@ def _compact_value(value: Any) -> str:
             return "—"
         return " · ".join(_one_line(item) for item in value)
     return _one_line(value)
+
+
+def _schedule_summary(report: Mapping[str, Any]) -> str | None:
+    day = str(report.get("scheduled_date", ""))
+    epoch = str(report.get("started_at", ""))
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day):
+        return None
+    if not re.fullmatch(r"[0-9]{1,12}", epoch):
+        return None
+    try:
+        scheduled = datetime.fromisoformat(f"{day}T10:00:00+08:00")
+        started = datetime.fromtimestamp(int(epoch), timezone(timedelta(hours=8)))
+    except (ValueError, OverflowError, OSError):
+        return None
+    trigger = {
+        "schedule": "GitHub fallback",
+        "workflow_dispatch": "workflow_dispatch/API",
+    }.get(_text(report.get("trigger"), ""), "unknown trigger")
+    delay = _duration(max(0, (started - scheduled).total_seconds()))
+    return (
+        f"Scheduled {day} 10:00 CST · Actual start {started:%H:%M:%S} CST"
+        f" · Delay {delay} · {trigger}"
+    )
 
 
 def _scenario_summary(
@@ -187,7 +212,12 @@ def collect_report(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
         "fnn_version": env.get("CCH_REPORT_FNN_VERSION", "unknown"),
         "fnn_package": env.get("CCH_REPORT_FNN_PACKAGE", "unknown"),
         "total_seconds": env.get("CCH_REPORT_TOTAL_SECONDS"),
+        "scheduled_date": env.get("CCH_REPORT_SCHEDULED_DATE"),
+        "started_at": env.get("CCH_REPORT_STARTED_AT"),
+        "trigger": env.get("CCH_REPORT_TRIGGER"),
         "preflight": {
+            **({"Schedule gate": env["CCH_REPORT_GATE_OUTCOME"]}
+               if "CCH_REPORT_GATE_OUTCOME" in env else {}),
             "Checkout": env.get("CCH_REPORT_CHECKOUT_OUTCOME", "unknown"),
             "Python": env.get("CCH_REPORT_PYTHON_OUTCOME", "unknown"),
             "Dependencies": env.get(
@@ -242,6 +272,9 @@ def build_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         ),
         f"Package `{_truncate(_one_line(report.get('fnn_package'), 'unknown'), 180)}`",
     ]
+    schedule_summary = _schedule_summary(report)
+    if schedule_summary:
+        overview_lines.append(schedule_summary)
 
     fields = [
         {

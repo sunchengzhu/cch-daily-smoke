@@ -1,14 +1,28 @@
-name: cch scheduler preflight
+name: cch scheduler administration
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: "Read-only preflight, or install and verify the server timer"
+        type: choice
+        default: check
+        options:
+          - check
+          - install
 
-permissions: {}
+permissions:
+  contents: read
+
+concurrency:
+  group: cch-daily-smoke-scheduler-admin
+  cancel-in-progress: false
 
 jobs:
   preflight:
     runs-on: [self-hosted, test-new-02]
-    timeout-minutes: 2
+    timeout-minutes: 5
+    if: ${{ github.ref == 'refs/heads/main' }}
     steps:
       - name: Check server scheduling prerequisites (read only)
         shell: bash
@@ -36,3 +50,12 @@ jobs:
           else
             echo 'GitHub CLI: not installed'
           fi
+
+      - uses: actions/checkout@v7
+        if: ${{ inputs.operation == 'install' }}
+        with:
+          persist-credentials: false
+
+      - name: Install and verify the server timer
+        if: ${{ inputs.operation == 'install' }}
+        run: bash scripts/install_daily_smoke_timer.sh

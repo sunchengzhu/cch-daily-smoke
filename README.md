@@ -13,16 +13,26 @@
 
 ## 定时报告
 
-每日任务由外部调度器通过 `workflow_dispatch` 触发，并显式启用
-`send_discord_report`。不再使用 GitHub Actions 原生 `schedule`，因为它在共享调度高峰中
-可能延迟数小时。运行结束后，无论成功还是失败，都会向配置的 Discord webhook 发送一张
-状态卡片。卡片包含总结果、FNN 来源和版本、总耗时、前置检查状态，以及三组 smoke
-各自的状态、耗时、双向金额、手续费和净变化。失败时会直接标出失败或未执行的阶段，
-并保留完整运行日志链接。
+常在线 `test-new-02` 的 systemd timer 每天北京时间 **10:00** 通过
+`workflow_dispatch` 触发 `main`，传入 `scheduled_date=YYYY-MM-DD` 和
+`send_discord_report=true`。时区在 timer 中显式指定，不依赖服务器默认时区，
+也不依赖个人电脑或 Codex。10:00 后每 5 分钟检查一次补跑/请求确认；当天请求已被
+GitHub 接受后，后续检查直接退出。GitHub 原生 **10:17** `schedule` 保留为兜底，
+它可能延迟，不能保证准点。
 
-当前部署使用 Codex 桌面端的 `CCH Daily Smoke Trigger` 本地计划任务，每天北京时间
-10:00 执行，并在触发前检查当天是否已经存在运行，以免重复。运行该计划任务的电脑需要
-保持开机，Codex 桌面应用也需要保持运行。
+两个入口共用 runner 上的持久执行记录，同一天只有一个自动运行进入烟测；延迟到达
+的兜底或重复 dispatch 会跳过烟测和 Discord。失败的烟测不会自动反复执行；需要时在
+当天显式重新运行原 run，或发起未填写 `scheduled_date` 的普通手动运行。
+跨日恢复使用普通手动运行，避免旧的排队任务占用新一天的日报名额。
+普通手动运行不占用当天日报名额。服务器开机补触发只处理当天已到点的任务。
+
+报告包含计划时间、实际烟测开始时间及延迟，以及 FNN 来源、版本、总耗时、前置检查、
+三组 smoke 的金额、手续费和净变化。服务器/网络、GitHub API 或 runner 繁忙仍可能
+造成延迟；FNN 升级时的数据库校验也会增加报告耗时，不应为了准点而跳过校验。
+
+服务器调度器复用 `ckb` 账户既有的 GitHub CLI 登录，不复制个人电脑上的 token，
+不保存 workflow 的临时 `GITHUB_TOKEN`。认证至少需要此仓库的 Actions 写权限。
+部署与排查见 [服务器调度说明](docs/daily-smoke-scheduler.md)。
 
 需要临时预览卡片时，可以手动运行 workflow 并勾选 `send_discord_report`；该开关
 默认关闭，未勾选的普通手动运行仍不会发送。
