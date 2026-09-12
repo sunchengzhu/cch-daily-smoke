@@ -59,3 +59,10 @@ jobs:
       - name: Install and verify the server timer
         if: ${{ inputs.operation == 'install' }}
         run: bash scripts/install_daily_smoke_timer.sh
+
+      - name: Read installed scheduler status
+        if: ${{ always() }}
+        run: |
+          systemctl show cch-daily-smoke-dispatch.service -p LoadState -p Result -p ExecMainStatus
+          systemctl list-timers cch-daily-smoke-dispatch.timer --all --no-pager
+          sudo -n journalctl -u cch-daily-smoke-dispatch.service -n 20 --no-pager

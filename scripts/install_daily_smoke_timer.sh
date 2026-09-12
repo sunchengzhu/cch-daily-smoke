@@ -23,7 +23,10 @@ sudo -n systemctl daemon-reload
 sudo -n systemctl enable --now cch-daily-smoke-dispatch.timer
 # Validate the installed service using the same identity/environment as the timer.
 # The daily state makes subsequent starts read-only no-ops after acceptance.
-sudo -n systemctl start cch-daily-smoke-dispatch.service
+if ! sudo -n systemctl start cch-daily-smoke-dispatch.service; then
+  sudo -n journalctl -u cch-daily-smoke-dispatch.service -n 20 --no-pager
+  exit 1
+fi
 sudo -n systemctl show cch-daily-smoke-dispatch.service -p Result -p ExecMainStatus
 sudo -n systemctl list-timers cch-daily-smoke-dispatch.timer --all --no-pager
 sudo -n journalctl -u cch-daily-smoke-dispatch.service -n 12 --no-pager
