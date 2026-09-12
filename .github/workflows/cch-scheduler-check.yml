@@ -1,0 +1,38 @@
+name: cch scheduler preflight
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  preflight:
+    runs-on: [self-hosted, test-new-02]
+    timeout-minutes: 2
+    steps:
+      - name: Check server scheduling prerequisites (read only)
+        shell: bash
+        run: |
+          set -uo pipefail
+          printf 'Runner user: %s\n' "$(id -un)"
+          date --iso-8601=seconds
+          timedatectl show -p Timezone -p NTPSynchronized || true
+          systemctl --version | head -n 1
+          if sudo -n true; then
+            echo 'Non-interactive sudo: available'
+          else
+            echo 'Non-interactive sudo: unavailable'
+          fi
+          if command -v gh >/dev/null; then
+            gh --version | head -n 1
+            # Do not use job tokens or print stored credentials.
+            if env -u GH_TOKEN -u GITHUB_TOKEN gh api \
+              repos/sunchengzhu/cch-daily-smoke/actions/workflows/cch-daily-smoke.yml \
+              --jq '{id, state}'; then
+              echo 'Existing server GitHub CLI access: available'
+            else
+              echo 'Existing server GitHub CLI access: unavailable'
+            fi
+          else
+            echo 'GitHub CLI: not installed'
+          fi
