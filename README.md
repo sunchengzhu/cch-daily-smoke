@@ -13,7 +13,7 @@
 
 ## 定时报告
 
-目标部署：常在线 `test-new-02` 的 systemd timer 每天北京时间 **10:00** 通过
+常在线 `test-new-02` 的 systemd timer 每天北京时间 **10:00** 通过
 `workflow_dispatch` 触发 `main`，传入 `scheduled_date=YYYY-MM-DD` 和
 `send_discord_report=true`。时区在 timer 中显式指定，不依赖服务器默认时区，
 也不依赖个人电脑或 Codex。10:00 后每 5 分钟检查一次补跑/请求确认；当天请求已被
@@ -31,8 +31,8 @@ GitHub 接受后，后续检查直接退出。GitHub 原生 **10:17** `schedule`
 造成延迟；FNN 升级时的数据库校验也会增加报告耗时，不应为了准点而跳过校验。
 
 服务器调度器使用专门配置的此仓库 Actions 写权限凭证，不保存 workflow 的临时
-`GITHUB_TOKEN`。当前服务器的原有 GitHub 登录没有派发权限；定时器暂时停用，
-待配置仓库 Secret `CCH_SMOKE_DISPATCH_TOKEN` 后验证启用。GitHub 定时兜底已恢复。
+`GITHUB_TOKEN`。仓库 Secret `CCH_SMOKE_DISPATCH_TOKEN` 已于 2026-09-12 完成
+实际派发权限验证，服务器定时器已安装并启用；GitHub 定时兜底继续保留。
 部署与排查见 [服务器调度说明](docs/daily-smoke-scheduler.md)。
 
 需要临时预览卡片时，可以手动运行 workflow 并勾选 `send_discord_report`；该开关

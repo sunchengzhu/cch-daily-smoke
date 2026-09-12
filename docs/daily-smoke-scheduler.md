@@ -5,10 +5,14 @@
 boot. The dispatch state prevents additional requests once GitHub has accepted
 the day's request. The 10:17 GitHub schedule is an independent, best-effort fallback.
 
-Deployment status (2026-09-12): the units are installed but the timer is paused.
-The server's pre-existing GitHub login has read-only repository access and dispatch
-returns HTTP 403. Configure the dedicated credential below before enabling it.
-The GitHub fallback is enabled; the workstation Codex automation is paused.
+Deployment status (2026-09-12): the dedicated credential passed an
+[actual dispatch verification](https://github.com/sunchengzhu/cch-daily-smoke/actions/runs/34692751061).
+The [installation](https://github.com/sunchengzhu/cch-daily-smoke/actions/runs/34692784917)
+enabled the timer and completed with `Result=success`, `ExecMainStatus=0`.
+Today's execution had already been claimed, so the verification run skipped smoke
+and Discord, and the installed service reported `Already accepted` without another
+dispatch. Write permission was proven by the explicit verification, not that no-op.
+The GitHub fallback is enabled; the workstation Codex automation remains paused.
 
 ## Deployment
 
