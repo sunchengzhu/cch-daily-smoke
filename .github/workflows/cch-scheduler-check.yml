@@ -10,6 +10,7 @@ on:
         options:
           - check
           - install
+          - verify-dispatch
 
 permissions:
   contents: read
@@ -38,12 +39,16 @@ jobs:
             echo 'Non-interactive sudo: unavailable'
           fi
           if command -v gh >/dev/null; then
+            command -v gh
             gh --version | head -n 1
             # Do not use job tokens or print stored credentials.
             if env -u GH_TOKEN -u GITHUB_TOKEN gh api \
               repos/sunchengzhu/cch-daily-smoke/actions/workflows/cch-daily-smoke.yml \
               --jq '{id, state}'; then
               echo 'Existing server GitHub CLI access: available'
+              env -u GH_TOKEN -u GITHUB_TOKEN gh api user --jq .login
+              env -u GH_TOKEN -u GITHUB_TOKEN gh api \
+                repos/sunchengzhu/cch-daily-smoke --jq .permissions
             else
               echo 'Existing server GitHub CLI access: unavailable'
             fi
@@ -59,6 +64,14 @@ jobs:
       - name: Install and verify the server timer
         if: ${{ inputs.operation == 'install' }}
         run: bash scripts/install_daily_smoke_timer.sh
+
+      - name: Explicitly verify dispatch using the server login
+        if: ${{ inputs.operation == 'verify-dispatch' }}
+        run: |
+          env -u GH_TOKEN -u GITHUB_TOKEN gh workflow run cch-daily-smoke.yml \
+            --repo sunchengzhu/cch-daily-smoke --ref main \
+            --raw-field scheduled_date="$(TZ=Asia/Shanghai date +%F)" \
+            --raw-field fiber_source=release --raw-field send_discord_report=true
 
       - name: Read installed scheduler status
         if: ${{ always() }}
