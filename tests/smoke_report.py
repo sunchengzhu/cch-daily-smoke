@@ -1,15 +1,85 @@
-"""Machine-readable output shared by the live smoke tests."""
+"""Machine-readable output and CI payment details shared by live smoke tests."""
 
 from __future__ import annotations
 
 import json
 import os
+from html import escape
 from pathlib import Path
 
 
 SMOKE_REPORT_MARKER = "SMOKE_REPORT_JSON="
 REPORT_KEYS = {"duration_seconds", "topology", "flows", "fees", "net"}
 FLOW_KEYS = {"direction", "paid", "received"}
+
+
+def _markdown_text(value: str) -> str:
+    text = escape(value, quote=False).replace("\\", "\\\\")
+    for character in ("`", "*", "_", "[", "]", "|"):
+        text = text.replace(character, f"\\{character}")
+    return text.replace("\n", "<br>")
+
+
+def append_flow_summary(
+    *,
+    scenario: str,
+    number: int,
+    direction: str,
+    money_path: tuple[tuple[str, str], ...],
+    payment_hash: str,
+    paid: str,
+    received: str,
+    fees: dict[str, str],
+    balances: tuple[tuple[str, str, dict, dict], ...],
+    assertions: str,
+) -> str:
+    """Append one verified payment immediately, preserving partial run results."""
+
+    lines = [
+        f"## {_markdown_text(scenario)} · FLOW {number} · "
+        f"{_markdown_text(direction)}",
+        "",
+        "- **Status:** ✅ Success",
+        f"- **Payer:** {_markdown_text(paid)}",
+        f"- **Recipient:** {_markdown_text(received)}",
+        f"- **Assertions:** ✅ {_markdown_text(assertions)}",
+        f"- **Payment hash:** {_markdown_text(payment_hash)}",
+        "",
+        "### Payment path",
+        "",
+    ]
+    lines.extend(
+        f"- **{_markdown_text(label)}:** {_markdown_text(path)}"
+        for label, path in money_path
+    )
+    lines.extend(["", "### Fees", ""])
+    lines.extend(
+        f"- **{_markdown_text(label)}:** {_markdown_text(value)}"
+        for label, value in fees.items()
+    )
+    for title, unit, before, after in balances:
+        lines.extend(
+            [
+                "",
+                f"### {_markdown_text(title)} ({_markdown_text(unit)})",
+                "",
+                "| Node | Before | After | Change |",
+                "| --- | ---: | ---: | ---: |",
+            ]
+        )
+        lines.extend(
+            f"| {_markdown_text(node)} | {value:,} | {after[node]:,} | "
+            f"{after[node] - value:+,} |"
+            for node, value in before.items()
+            if node not in {"scid", "chan_id", "channel_point", "channel_id"}
+            and not node.endswith("spendable")
+        )
+    markdown = "\n".join(lines) + "\n\n"
+    github_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if github_summary:
+        with Path(github_summary).open("a", encoding="utf-8") as summary:
+            summary.write(markdown)
+    return markdown
 
 
 def emit_smoke_report(report: dict) -> str:

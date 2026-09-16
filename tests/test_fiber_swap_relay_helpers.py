@@ -253,7 +253,11 @@ def test_msat_fee_format_is_concise():
     assert format_msat_as_sats(1200) == "1.200 sats"
 
 
-def test_relay_fee_summaries_distinguish_unknown_and_known_fee_parts(capsys):
+def test_relay_fee_summaries_distinguish_unknown_and_known_fee_parts(
+    capsys, monkeypatch, tmp_path
+):
+    summary_path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
     config = SimpleNamespace(lnd_container="lnd-c")
     lnd_before = {
         "channel_point": "funding:1",
@@ -298,6 +302,18 @@ def test_relay_fee_summaries_distinguish_unknown_and_known_fee_parts(capsys):
     assert "Fiber route fee     : amount not exposed by the external API" in output
     assert "1 sat final-hop fee (invoice hint)" in output
     assert "paid by FiberSwap CCH LND; total not exposed" in output
+    summary = summary_path.read_text(encoding="utf-8")
+    assert "## FiberSwap relay · FLOW 1 · BTC → cWBTC via relay LND" in summary
+    assert "## FiberSwap relay · FLOW 2 · cWBTC → BTC via relay LND" in summary
+    assert "lnd-c paid 201 sats" in summary
+    assert "lnd-c received 201 sats" in summary
+    assert "Amount not exposed by the external API" in summary
+    assert "1 sat final-hop fee (invoice hint)" in summary
+    assert "paid by FiberSwap CCH LND; total not exposed" in summary
+    assert "| Local LND | 10,000 | 9,799 | -201 |" in summary
+    assert "| fiber2 | 1,100 | 798 | -302 |" in summary
+    assert "**Payment hash:** 0xflow1" in summary
+    assert "**Payment hash:** 0xflow2" in summary
 
 
 def test_private_relay_invoice_uses_24_hour_expiry_and_relay_route_hint(

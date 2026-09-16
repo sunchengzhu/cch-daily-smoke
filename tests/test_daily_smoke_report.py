@@ -1,5 +1,8 @@
+import html
 import json
+import re
 from datetime import datetime
+from unittest import mock
 
 import pytest
 
@@ -69,7 +72,16 @@ def fields_by_name(payload):
     }
 
 
-def test_success_payload_has_one_green_embed_and_key_details():
+def github_summary(env):
+    return report.build_github_summary(report.collect_report(env))
+
+
+def summary_text(env):
+    """Compare visible values independently of Markdown escaping."""
+    return re.sub(r"\\([\\|*_\[\]])", r"\1", html.unescape(github_summary(env)))
+
+
+def test_success_payload_has_one_compact_green_embed_and_full_report_link():
     payload = report.payload_from_env(complete_env())
     embed = payload["embeds"][0]
     fields = fields_by_name(payload)
@@ -79,30 +91,29 @@ def test_success_payload_has_one_green_embed_and_key_details():
     assert embed["color"] == report.SUCCESS_COLOR
     assert embed["title"] == "✅ CCH Daily Smoke · Testnet · #42"
     assert embed["url"].endswith("/actions/runs/123")
-    assert embed["description"] == "3/3 smoke scenarios passed."
-    assert "View full run log" not in embed["description"]
-    assert "2m 5s" in fields["Run overview"]
-    assert "`codex/report`" in fields["Run overview"]
-    assert "`0123456`" in fields["Run overview"]
-    assert "retry `2`" in fields["Run overview"]
+    assert embed["description"] == "3/3 smoke scenarios passed. · ⏱ 2m 5s"
+    assert set(fields) == {"Run overview", "Checks", "Scenarios"}
+    assert any("retry" in line.lower() and "2" in line for line in fields["Run overview"].splitlines())
     assert "FNN `v0.9.0`" in fields["Run overview"]
-    assert "fnn-v0.9.0-x86_64-linux.tar.gz" in fields["Run overview"]
-    assert fields["Preflight"] == (
-        "✅ **All passed** · Checkout · Python · Dependencies · Unit tests · "
-        "FNN auth · FNN nodes · LND liquidity · Cleanup"
-    )
+    assert "release" in fields["Run overview"]
+    assert fields["Checks"] == "✅ All checks passed"
+    assert embed["footer"]["text"] == "Click the title for the full report and logs"
+    rendered = json.dumps(payload, ensure_ascii=False)
+    for detail in (
+        "codex/report", "0123456", "fnn-v0.9.0-x86_64-linux.tar.gz",
+        "fiber2 paid", "lnd-b received", "raw cWBTC", "Topology", "Net:",
+    ):
+        assert detail not in rendered
 
 
-def test_first_attempt_uses_a_short_single_line_ref_summary():
+def test_first_attempt_does_not_add_retry_or_repository_metadata():
     env = complete_env()
     env["CCH_REPORT_RUN_ATTEMPT"] = "1"
 
     overview = fields_by_name(report.payload_from_env(env))["Run overview"]
-    ref_line = overview.splitlines()[1]
-
-    assert ref_line == "Branch `codex/report` · `0123456`"
-    assert "attempt" not in ref_line
-    assert "retry" not in ref_line
+    assert "retry" not in overview
+    assert "Branch" not in overview
+    assert "0123456" not in overview
 
 
 @pytest.mark.parametrize(
@@ -114,7 +125,7 @@ def test_first_attempt_uses_a_short_single_line_ref_summary():
         ("2026-09-13T02:00:00+00:00", "schedule", "10:00:00 CST · Delay 24h 0m 0s · GitHub fallback"),
     ],
 )
-def test_schedule_reports_beijing_start_and_nonnegative_delay(started, trigger, expected):
+def test_schedule_details_stay_in_ci_while_discord_shows_actual_start(started, trigger, expected):
     env = complete_env()
     env.update({
         "CCH_REPORT_SCHEDULED_DATE": "2026-09-12",
@@ -124,20 +135,19 @@ def test_schedule_reports_beijing_start_and_nonnegative_delay(started, trigger, 
 
     fields = fields_by_name(report.payload_from_env(env))
 
-    assert fields["Run overview"].splitlines()[-1] == (
-        "Scheduled 2026-09-12 10:00 CST · Actual start " + expected
-    )
+    assert "Scheduled 2026-09-12 10:00 CST · Actual start " + expected in summary_text(env)
+    assert expected.split(" · Delay")[0] in fields["Run overview"]
+    assert "Delay" not in fields["Run overview"]
+    assert "Scheduled 2026-09-12 10:00" not in fields["Run overview"]
 
 
-def test_absent_schedule_metadata_preserves_existing_overview():
+def test_absent_schedule_metadata_still_renders_a_compact_overview():
     overview = fields_by_name(report.payload_from_env(complete_env()))["Run overview"]
 
-    assert overview == (
-        "✅ **Passed** · ⏱ 2m 5s\n"
-        "Branch `codex/report` · `0123456` · retry `2`\n"
-        "Fiber source `release` · FNN `v0.9.0`\n"
-        "Package `fnn-v0.9.0-x86_64-linux.tar.gz`"
-    )
+    assert "release" in overview
+    assert "FNN `v0.9.0`" in overview
+    assert "Delay" not in overview
+    assert len(overview.splitlines()) <= 4
 
 
 @pytest.mark.parametrize(
@@ -152,51 +162,95 @@ def test_absent_schedule_metadata_preserves_existing_overview():
         ("2026-09-12", "1" * 5000),
     ],
 )
-def test_invalid_schedule_metadata_does_not_change_or_break_report(day, started):
+def test_invalid_schedule_metadata_does_not_invent_schedule_details(day, started):
     env = complete_env()
-    baseline = report.payload_from_env(env)
     env.update({"CCH_REPORT_SCHEDULED_DATE": day, "CCH_REPORT_STARTED_AT": started})
 
-    assert report.payload_from_env(env) == baseline
+    overview = fields_by_name(report.payload_from_env(env))["Run overview"]
+
+    assert "FNN `v0.9.0`" in overview
+    assert "Delay" not in overview
+    assert "Scheduled 2026" not in github_summary(env)
+
+
+@pytest.mark.parametrize("trigger,label", [("schedule", "Scheduled"), ("workflow_dispatch", "Manual")])
+def test_valid_actual_start_is_shown_without_scheduled_date(trigger, label):
+    env = complete_env()
+    env.update({
+        "CCH_REPORT_STARTED_AT": str(int(datetime.fromisoformat("2026-09-16T03:56:23+00:00").timestamp())),
+        "CCH_REPORT_TRIGGER": trigger,
+    })
+
+    overview = fields_by_name(report.payload_from_env(env))["Run overview"]
+
+    assert label in overview
+    assert "2026-09-16 11:56:23 CST" in overview
 
 
 def test_schedule_gate_failure_is_visible_before_other_preflight_steps():
     env = complete_env()
     env["CCH_REPORT_GATE_OUTCOME"] = "failure"
 
-    preflight = fields_by_name(report.payload_from_env(env))["Preflight"]
+    preflight = fields_by_name(report.payload_from_env(env))["Checks"]
 
-    assert preflight.startswith("❌ Schedule gate · ✅ Checkout")
-    assert "All passed" not in preflight
+    assert preflight.startswith("❌ Schedule gate")
+    assert "Checkout" not in preflight
+    assert "All checks passed" not in preflight
+    assert "Schedule gate" in github_summary(env)
 
 
-def test_preflight_keeps_per_stage_status_when_results_are_mixed():
+def test_discord_shows_only_failed_or_skipped_checks_and_ci_keeps_all_stages():
     env = complete_env()
     env["CCH_REPORT_DEPENDENCIES_OUTCOME"] = "failure"
     env["CCH_REPORT_UNIT_OUTCOME"] = "skipped"
 
-    preflight = fields_by_name(report.payload_from_env(env))["Preflight"]
+    preflight = fields_by_name(report.payload_from_env(env))["Checks"]
 
-    assert "All passed" not in preflight
-    assert "✅ Checkout" in preflight
+    assert "All checks passed" not in preflight
+    assert "Checkout" not in preflight
     assert "❌ Dependencies" in preflight
     assert "⏭️ Unit tests" in preflight
+    summary = summary_text(env)
+    for label in ("Checkout", "Python", "Dependencies", "Unit tests", "FNN auth", "FNN nodes", "LND liquidity", "Cleanup"):
+        assert label in summary
 
 
-def test_scenario_fields_render_flows_fees_net_and_duration():
+def test_discord_scenarios_are_three_status_and_duration_lines():
     payload = report.payload_from_env(complete_env())
     fields = fields_by_name(payload)
-    local = fields["✅ Local CCH"]
-    relay = fields["✅ FiberSwap · via relay LND"]
+    lines = fields["Scenarios"].splitlines()
 
-    assert "⏱ 1m 5s" in local
-    assert "**Topology:** fiber2 → CCH → lnd-b" in local
-    assert "**cWBTC → BTC** · fiber2 paid 110 raw cWBTC" in local
-    assert "→ lnd-b received 100 sats" in local
-    assert local.startswith("**Passed** · ⏱")
-    assert "**Fees:** CCH: 10 sats · Lightning: 1 sat · Fiber: 0" in local
-    assert "**Net:** fiber2: 0 raw cWBTC · lnd-b: -1 sat" in local
-    assert "relay LND" in relay
+    assert len(lines) == 3
+    for line, (_key, label) in zip(lines, report.SCENARIOS):
+        assert label in line
+        assert "✅" in line
+        assert "Passed" in line
+        assert "1m 5s" in line
+        assert "paid" not in line
+        assert "fees" not in line.lower()
+
+
+def test_ci_summary_preserves_full_run_and_scenario_details():
+    env = complete_env()
+    summary = summary_text(env)
+
+    for value in (
+        "codex/report", "0123456789abcdef", "fnn-v0.9.0-x86_64-linux.tar.gz",
+        "v0.9.0", "release", "/actions/runs/123", "2m 5s",
+    ):
+        assert value in summary
+    for key, label in report.SCENARIOS:
+        assert label in summary
+        data = json.loads(env[f"CCH_REPORT_{key.upper()}_JSON"])
+        assert data["topology"] in summary
+        for flow in data["flows"]:
+            for value in flow.values():
+                assert value in summary
+        for group in ("fees", "net"):
+            for name, value in data[group].items():
+                assert name in summary
+                assert value in summary
+    assert "1m 5s" in summary
 
 
 def test_failure_and_skipped_steps_are_clear_without_summaries():
@@ -218,10 +272,49 @@ def test_failure_and_skipped_steps_are_clear_without_summaries():
     assert embed["color"] == report.FAILURE_COLOR
     assert embed["title"].startswith("❌")
     assert "did not pass" in embed["description"]
-    assert "**Failed**" in fields["❌ FiberSwap · direct LND"]
-    assert "open the run log" in fields["❌ FiberSwap · direct LND"]
-    assert "**Skipped**" in fields["⏭️ FiberSwap · via relay LND"]
-    assert "earlier step" in fields["⏭️ FiberSwap · via relay LND"]
+    assert "1/3 smoke scenarios passed" in embed["description"]
+    direct, relay = fields["Scenarios"].splitlines()[1:]
+    assert "❌" in direct and "Failed" in direct
+    assert "⏭️" in relay and "Skipped" in relay
+    summary = github_summary(env)
+    assert "open the run log" in summary
+    assert "earlier step" in summary
+
+
+def test_cancelled_run_does_not_claim_skipped_scenarios_passed():
+    env = complete_env()
+    env.update({
+        "CCH_REPORT_JOB_RESULT": "cancelled",
+        "CCH_REPORT_DIRECT_OUTCOME": "cancelled",
+        "CCH_REPORT_DIRECT_JSON": "",
+        "CCH_REPORT_RELAY_OUTCOME": "skipped",
+        "CCH_REPORT_RELAY_JSON": "",
+    })
+
+    payload = report.payload_from_env(env)
+    embed = payload["embeds"][0]
+
+    assert embed["title"].startswith("🛑")
+    assert "1/3 smoke scenarios passed" in embed["description"]
+    assert "did not pass" in embed["description"]
+    assert "Cancelled" in fields_by_name(payload)["Scenarios"]
+    assert "Cancelled" in github_summary(env)
+
+
+def test_gate_failure_reports_unstarted_smoke_stages_as_skipped():
+    env = {
+        "CCH_REPORT_JOB_RESULT": "failure",
+        "CCH_REPORT_GATE_OUTCOME": "failure",
+        "CCH_REPORT_SMOKE_JOB_RESULT": "skipped",
+        "CCH_REPORT_LOCAL_OUTCOME": "",
+    }
+    fields = fields_by_name(report.payload_from_env(env))
+
+    assert "❌ Schedule gate" in fields["Checks"]
+    assert "⏭️ Checkout" in fields["Checks"]
+    assert fields["Scenarios"].count("Skipped") == 3
+    assert "Unknown" not in fields["Scenarios"]
+    assert "earlier step" in github_summary(env)
 
 
 def test_invalid_scenario_json_does_not_prevent_failure_report():
@@ -232,7 +325,21 @@ def test_invalid_scenario_json_does_not_prevent_failure_report():
 
     fields = fields_by_name(report.payload_from_env(env))
 
-    assert "invalid report JSON" in fields["❌ Local CCH"]
+    assert "summary unavailable" in fields["Scenarios"].splitlines()[0].lower()
+    assert "invalid report JSON" in github_summary(env)
+    assert "{not-json" not in github_summary(env)
+
+
+@pytest.mark.parametrize("raw", ["", "null", "[]", "{}"])
+def test_missing_scenario_details_are_explicit_even_if_step_succeeded(raw):
+    env = complete_env()
+    env["CCH_REPORT_LOCAL_JSON"] = raw
+
+    local = fields_by_name(report.payload_from_env(env))["Scenarios"].splitlines()[0]
+
+    assert "Passed" in local
+    assert "summary unavailable" in local.lower()
+    assert "unavailable" in github_summary(env).lower()
 
 
 def test_report_accepts_string_fees_and_net():
@@ -242,10 +349,26 @@ def test_report_accepts_string_fees_and_net():
     data["net"] = "principal round trip balanced"
     env["CCH_REPORT_LOCAL_JSON"] = json.dumps(data)
 
-    local = fields_by_name(report.payload_from_env(env))["✅ Local CCH"]
+    summary = github_summary(env)
 
-    assert "**Fees:** CCH 10 sats; routes 0" in local
-    assert "**Net:** principal round trip balanced" in local
+    assert "CCH 10 sats; routes 0" in summary
+    assert "principal round trip balanced" in summary
+
+
+def test_ci_summary_is_not_truncated_at_discord_field_limits():
+    env = complete_env()
+    data = json.loads(env["CCH_REPORT_LOCAL_JSON"])
+    data["topology"] = "topology-start-" + "x" * 3000 + "-topology-end"
+    data["fees"]["CCH"] = "fee-start-" + "y" * 3000 + "-fee-end"
+    data["net"]["fiber2"] = "net-start-" + "z" * 3000 + "-net-end"
+    env["CCH_REPORT_LOCAL_JSON"] = json.dumps(data)
+
+    summary = github_summary(env)
+
+    assert data["topology"] in summary
+    assert data["fees"]["CCH"] in summary
+    assert data["net"]["fiber2"] in summary
+    assert len(summary) > 6000
 
 
 def test_discord_field_and_embed_character_limits_are_enforced():
@@ -254,19 +377,72 @@ def test_discord_field_and_embed_character_limits_are_enforced():
     env["CCH_REPORT_LOCAL_JSON"] = scenario_json("x" * 5000)
     env["CCH_REPORT_DIRECT_JSON"] = scenario_json("y" * 5000)
     env["CCH_REPORT_RELAY_JSON"] = scenario_json("z" * 5000)
+    for key in ("FNN_VERSION", "FIBER_SOURCE", "RUN_NUMBER", "RUN_ATTEMPT", "TRIGGER"):
+        env[f"CCH_REPORT_{key}"] = "😀@everyone`\n" * 2000
 
     embed = report.payload_from_env(env)["embeds"][0]
     fields = embed["fields"]
-    total = (
-        len(embed["title"])
-        + len(embed["description"])
-        + len(embed["footer"]["text"])
-        + sum(len(field["name"]) + len(field["value"]) for field in fields)
-    )
+    length = lambda value: len(value.encode("utf-16-le")) // 2
+    total = sum(length(embed[key]) for key in ("title", "description"))
+    total += length(embed["footer"]["text"])
+    total += sum(length(field["name"]) + length(field["value"]) for field in fields)
 
-    assert all(len(field["name"]) <= 256 for field in fields)
-    assert all(len(field["value"]) <= 1024 for field in fields)
+    assert length(embed["title"]) <= 256
+    assert length(embed["description"]) <= 4096
+    assert all(length(field["name"]) <= 256 for field in fields)
+    assert all(length(field["value"]) <= 1024 for field in fields)
     assert total <= 6000
+
+
+@pytest.mark.parametrize("duration", ["NaN", "Infinity", "-Infinity", "invalid"])
+def test_invalid_duration_is_unavailable_instead_of_crashing(duration):
+    env = complete_env()
+    env["CCH_REPORT_TOTAL_SECONDS"] = duration
+
+    assert "duration unavailable" in report.payload_from_env(env)["embeds"][0]["description"]
+    assert "duration unavailable" in github_summary(env)
+
+
+def test_summary_only_appends_full_report_without_webhook_or_network(monkeypatch, tmp_path):
+    env = complete_env()
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    destination = tmp_path / "summary.md"
+    destination.write_text("Existing summary\n", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(destination))
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    request = mock.Mock(side_effect=AssertionError("summary-only must not use the network"))
+    monkeypatch.setattr(report.urllib.request, "urlopen", request)
+
+    report.main(["--summary-only"])
+
+    actual = destination.read_text(encoding="utf-8")
+    assert actual.startswith("Existing summary\n")
+    assert github_summary(env).strip() in actual
+    request.assert_not_called()
+
+
+def test_summary_only_requires_a_summary_destination(monkeypatch):
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+
+    with pytest.raises(SystemExit, match="GITHUB_STEP_SUMMARY"):
+        report.main(["--summary-only"])
+
+
+def test_dry_run_prints_compact_payload_without_credentials_or_network(monkeypatch, capsys):
+    env = complete_env()
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    request = mock.Mock(side_effect=AssertionError("dry-run must not use the network"))
+    monkeypatch.setattr(report.urllib.request, "urlopen", request)
+
+    report.main(["--dry-run"])
+
+    actual = json.loads(capsys.readouterr().out)
+    assert actual == report.payload_from_env(env)
+    request.assert_not_called()
 
 
 def test_send_discord_webhook_posts_json_with_mentions_disabled(monkeypatch):
@@ -304,4 +480,4 @@ def test_main_requires_webhook_url(monkeypatch):
     monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
 
     with pytest.raises(SystemExit, match="DISCORD_WEBHOOK_URL is required"):
-        report.main()
+        report.main([])

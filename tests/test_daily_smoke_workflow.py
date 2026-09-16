@@ -51,6 +51,22 @@ def test_discord_report_receives_all_smoke_results_and_summaries():
     assert "sarisia/actions-status-discord" not in workflow
 
 
+def test_ci_summary_is_independent_of_discord_and_written_before_notification():
+    report_job = workflow_text().split("  report:\n", 1)[1]
+    job_config, steps = report_job.split("    steps:\n", 1)
+    assert "always()" in job_config
+    assert "should_run == 'true'" in job_config
+    assert "send_discord_report" not in job_config
+    assert "DISCORD_WEBHOOK_URL" not in job_config
+    summary, notification = steps.split("      - name: Send compact Discord report", 1)
+    assert "if: ${{ always() }}" in summary
+    assert "scripts/send_daily_smoke_report.py --summary-only" in summary
+    assert "send_discord_report" not in summary
+    assert "(github.event_name == 'schedule' || inputs.send_discord_report)" in notification
+    assert "continue-on-error: true" in notification
+    assert "DISCORD_WEBHOOK_URL" in notification
+
+
 def test_fnn_metadata_outputs_are_emitted_before_fallible_update_stages():
     script = update_fnn_text()
 

@@ -21,7 +21,9 @@ from test_cch_daily_smoke import (
 )
 
 
-def test_flow_summary_prints_before_after_and_change(capsys):
+def test_flow_summary_prints_before_after_and_change(capsys, monkeypatch, tmp_path):
+    summary_path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
     print_flow_summary(
         number=1,
         direction="cWBTC → BTC",
@@ -72,9 +74,18 @@ def test_flow_summary_prints_before_after_and_change(capsys):
     assert "Fiber channel:" not in output
     assert "LND channel:" not in output
     assert "LND outpoint:" not in output
+    summary = summary_path.read_text(encoding="utf-8")
+    assert "## Local CCH · FLOW 1 · cWBTC → BTC" in summary
+    assert "fiber2 paid 110 raw cWBTC" in summary
+    assert "lnd-b received 100 sats" in summary
+    assert "**Payment hash:** 0x1234" in summary
+    assert "| fiber2 | 1,000 | 890 | -110 |" in summary
+    assert "| lnd-b | 100 | 200 | +100 |" in summary
+    assert "zero direct routing fees" in summary
 
 
-def test_flow_summary_prints_channel_details_in_debug_mode(capsys):
+def test_flow_summary_prints_channel_details_in_debug_mode(capsys, monkeypatch):
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     print_flow_summary(
         number=2,
         direction="BTC → cWBTC",

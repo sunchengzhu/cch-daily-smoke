@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and send the scheduled CCH daily-smoke report to Discord.
+"""Build the full CCH CI summary and a compact Discord notification.
 
 The report consumes explicit environment variables and structured scenario JSON.
 It intentionally does not scrape pytest or other human-readable command output.
@@ -7,13 +7,17 @@ It intentionally does not scrape pytest or other human-readable command output.
 
 from __future__ import annotations
 
+import argparse
+import html
 import json
+import math
 import os
 import re
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -47,12 +51,24 @@ def _one_line(value: Any, default: str = "—") -> str:
     return " ".join(_text(value, default).replace("`", "'").split())
 
 
+def _length(value: str) -> int:
+    return len(value.encode("utf-16-le", errors="replace")) // 2
+
+
 def _truncate(value: str, limit: int) -> str:
-    if len(value) <= limit:
+    if _length(value) <= limit:
         return value
     if limit <= 1:
-        return value[:limit]
-    return value[: limit - 1].rstrip() + "…"
+        return "…" if limit == 1 else ""
+    result = []
+    used = 0
+    for char in value:
+        size = _length(char)
+        if used + size > limit - 1:
+            break
+        result.append(char)
+        used += size
+    return "".join(result).rstrip() + "…"
 
 
 def _outcome(value: Any) -> tuple[str, str, str]:
@@ -63,8 +79,10 @@ def _outcome(value: Any) -> tuple[str, str, str]:
 
 def _duration(value: Any) -> str:
     try:
-        seconds = max(0.0, float(value))
-    except (TypeError, ValueError):
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "duration unavailable"
+    if not math.isfinite(seconds) or seconds < 0:
         return "duration unavailable"
 
     rounded = round(seconds)
@@ -117,48 +135,15 @@ def _schedule_summary(report: Mapping[str, Any]) -> str | None:
     )
 
 
-def _scenario_summary(
-    outcome_value: Any,
-    scenario: Mapping[str, Any] | None,
-    parse_error: str | None,
-) -> str:
-    normalized, _emoji, label = _outcome(outcome_value)
-    lines = [f"**{label}**"]
-
-    if scenario:
-        lines[0] += f" · ⏱ {_duration(scenario.get('duration_seconds'))}"
-        topology = scenario.get("topology")
-        if topology:
-            lines.append(f"**Topology:** {_one_line(topology)}")
-
-        flows = scenario.get("flows")
-        if isinstance(flows, list):
-            for flow in flows:
-                if not isinstance(flow, Mapping):
-                    continue
-                direction = _one_line(flow.get("direction"), "Flow")
-                paid = _one_line(flow.get("paid"), "payer unavailable")
-                received = _one_line(
-                    flow.get("received"), "recipient unavailable"
-                )
-                lines.append(f"• **{direction}** · {paid} → {received}")
-
-        if scenario.get("fees") is not None:
-            lines.append(f"**Fees:** {_compact_value(scenario['fees'])}")
-        if scenario.get("net") is not None:
-            lines.append(f"**Net:** {_compact_value(scenario['net'])}")
-    elif parse_error:
-        lines.append("Structured summary unavailable (invalid report JSON).")
-    elif normalized == "skipped":
-        lines.append("Not run because an earlier step did not complete.")
-    elif normalized in {"failure", "cancelled"}:
-        lines.append(
-            "No structured summary was produced; open the run log for details."
-        )
-    else:
-        lines.append("Structured summary unavailable.")
-
-    return _truncate("\n".join(lines), FIELD_VALUE_LIMIT)
+def _missing_summary(outcome_value: Any, parse_error: str | None) -> str:
+    normalized, _emoji, _label = _outcome(outcome_value)
+    if parse_error:
+        return "Structured summary unavailable (invalid report JSON)."
+    if normalized == "skipped":
+        return "Not run because an earlier step did not complete."
+    if normalized in {"failure", "cancelled"}:
+        return "No structured summary was produced; open the run log for details."
+    return "Structured summary unavailable."
 
 
 def _parse_scenario(raw: Any) -> tuple[Mapping[str, Any] | None, str | None]:
@@ -173,34 +158,24 @@ def _parse_scenario(raw: Any) -> tuple[Mapping[str, Any] | None, str | None]:
     return parsed, None
 
 
-def _preflight_summary(preflight: Mapping[str, Any]) -> str:
-    presentations = [
-        (label, *_outcome(outcome_value))
-        for label, outcome_value in preflight.items()
-    ]
-    if presentations and all(
-        normalized == "success"
-        for _label, normalized, _emoji, _status in presentations
-    ):
-        labels = " · ".join(label for label, *_rest in presentations)
-        return f"✅ **All passed** · {labels}"
-
-    return " · ".join(
-        f"{emoji} {label}"
-        for label, _normalized, emoji, _status in presentations
-    ) or "No preflight results."
-
-
 def collect_report(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Collect typed report data from the documented environment variables."""
 
     env = os.environ if environ is None else environ
+
+    def stage_outcome(key: str) -> str:
+        fallback = (
+            "skipped" if env.get("CCH_REPORT_SMOKE_JOB_RESULT") == "skipped"
+            else "unknown"
+        )
+        return env.get(key) or fallback
+
     scenarios: dict[str, dict[str, Any]] = {}
     for key, _label in SCENARIOS:
         prefix = f"CCH_REPORT_{key.upper()}"
         data, error = _parse_scenario(env.get(f"{prefix}_JSON"))
         scenarios[key] = {
-            "outcome": env.get(f"{prefix}_OUTCOME", "unknown"),
+            "outcome": stage_outcome(f"{prefix}_OUTCOME"),
             "data": data,
             "parse_error": error,
         }
@@ -218,18 +193,14 @@ def collect_report(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
         "preflight": {
             **({"Schedule gate": env["CCH_REPORT_GATE_OUTCOME"]}
                if "CCH_REPORT_GATE_OUTCOME" in env else {}),
-            "Checkout": env.get("CCH_REPORT_CHECKOUT_OUTCOME", "unknown"),
-            "Python": env.get("CCH_REPORT_PYTHON_OUTCOME", "unknown"),
-            "Dependencies": env.get(
-                "CCH_REPORT_DEPENDENCIES_OUTCOME", "unknown"
-            ),
-            "Unit tests": env.get("CCH_REPORT_UNIT_OUTCOME", "unknown"),
-            "FNN auth": env.get("CCH_REPORT_AUTH_OUTCOME", "unknown"),
-            "FNN nodes": env.get("CCH_REPORT_FNN_OUTCOME", "unknown"),
-            "LND liquidity": env.get(
-                "CCH_REPORT_LIQUIDITY_OUTCOME", "unknown"
-            ),
-            "Cleanup": env.get("CCH_REPORT_CLEANUP_OUTCOME", "unknown"),
+            "Checkout": stage_outcome("CCH_REPORT_CHECKOUT_OUTCOME"),
+            "Python": stage_outcome("CCH_REPORT_PYTHON_OUTCOME"),
+            "Dependencies": stage_outcome("CCH_REPORT_DEPENDENCIES_OUTCOME"),
+            "Unit tests": stage_outcome("CCH_REPORT_UNIT_OUTCOME"),
+            "FNN auth": stage_outcome("CCH_REPORT_AUTH_OUTCOME"),
+            "FNN nodes": stage_outcome("CCH_REPORT_FNN_OUTCOME"),
+            "LND liquidity": stage_outcome("CCH_REPORT_LIQUIDITY_OUTCOME"),
+            "Cleanup": stage_outcome("CCH_REPORT_CLEANUP_OUTCOME"),
         },
         "scenarios": scenarios,
         "run_url": env.get("CCH_REPORT_RUN_URL", ""),
@@ -239,128 +210,175 @@ def collect_report(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     }
 
 
-def build_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
-    """Render one Discord embed. This function has no network side effects."""
+def _started_at(report: Mapping[str, Any]) -> datetime | None:
+    epoch = str(report.get("started_at", ""))
+    if not re.fullmatch(r"[0-9]{1,12}", epoch):
+        return None
+    try:
+        return datetime.fromtimestamp(int(epoch), timezone(timedelta(hours=8)))
+    except (ValueError, OverflowError, OSError):
+        return None
 
-    result, result_emoji, result_label = _outcome(report.get("job_result"))
-    passed = result == "success"
-    run_number = _one_line(report.get("run_number"), "unknown")
-    run_url = _text(report.get("run_url"), "")
-    sha = _one_line(report.get("sha"), "unknown")
-    short_sha = sha[:7] if sha != "unknown" else sha
-    total_duration = _duration(report.get("total_seconds"))
-    fiber_source = _truncate(
-        _one_line(report.get("fiber_source"), "unknown"), 80
+
+def _run_overview(report: Mapping[str, Any]) -> str:
+    scheduled = bool(report.get("scheduled_date")) or report.get("trigger") == "schedule"
+    trigger = "Scheduled run" if scheduled else "Manual run"
+    started = _started_at(report)
+    timing = f"Started {started:%Y-%m-%d %H:%M:%S} CST" if started else "Start time unavailable"
+    lines = [f"{trigger} · {timing}"]
+    lines.append(
+        f"FNN `{_truncate(_one_line(report.get('fnn_version'), 'unknown'), 100)}`"
+        f" · {_truncate(_one_line(report.get('fiber_source'), 'unknown'), 80)}"
     )
-    fnn_version = _truncate(
-        _one_line(report.get("fnn_version"), "unknown"), 80
-    )
-    run_attempt = _one_line(report.get("run_attempt"), "unknown")
-    ref_line = (
-        f"Branch `{_truncate(_one_line(report.get('branch'), 'unknown'), 100)}`"
-        f" · `{short_sha}`"
-    )
-    if run_attempt not in {"1", "unknown"}:
-        ref_line += f" · retry `{run_attempt}`"
+    attempt = _one_line(report.get("run_attempt"), "unknown")
+    if attempt not in {"1", "unknown"}:
+        lines.append(f"Retry {attempt}")
+    return "\n".join(lines)
 
-    overview_lines = [
-        f"{result_emoji} **{result_label}** · ⏱ {total_duration}",
-        ref_line,
-        (
-            f"Fiber source `{fiber_source}`"
-            f" · FNN `{fnn_version}`"
-        ),
-        f"Package `{_truncate(_one_line(report.get('fnn_package'), 'unknown'), 180)}`",
-    ]
-    schedule_summary = _schedule_summary(report)
-    if schedule_summary:
-        overview_lines.append(schedule_summary)
 
-    fields = [
-        {
-            "name": "Run overview",
-            "value": _truncate("\n".join(overview_lines), FIELD_VALUE_LIMIT),
-            "inline": False,
-        },
-        {
-            "name": "Preflight",
-            "value": _truncate(
-                _preflight_summary(report.get("preflight", {})),
-                FIELD_VALUE_LIMIT,
-            ),
-            "inline": False,
-        },
-    ]
-
+def _scenario_lines(report: Mapping[str, Any]) -> list[str]:
+    lines = []
     scenarios = report.get("scenarios", {})
     for key, label in SCENARIOS:
-        scenario_report = scenarios.get(key, {})
-        _normalized, emoji, _status = _outcome(
-            scenario_report.get("outcome", "unknown")
-        )
-        fields.append(
-            {
-                "name": f"{emoji} {label}",
-                "value": _scenario_summary(
-                    scenario_report.get("outcome", "unknown"),
-                    scenario_report.get("data"),
-                    scenario_report.get("parse_error"),
-                ),
-                "inline": False,
-            }
-        )
+        scenario = scenarios.get(key, {})
+        _normalized, emoji, status = _outcome(scenario.get("outcome"))
+        line = f"{emoji} {label} · {status}"
+        if scenario.get("data"):
+            line += f" · {_duration(scenario['data'].get('duration_seconds'))}"
+        elif scenario.get("parse_error") or _normalized == "success":
+            line += " · summary unavailable"
+        lines.append(line)
+    return lines
 
-    scenario_outcomes = [
-        _outcome(scenarios.get(key, {}).get("outcome", "unknown"))[0]
+
+def _passed_count(report: Mapping[str, Any]) -> int:
+    scenarios = report.get("scenarios", {})
+    return sum(
+        _outcome(scenarios.get(key, {}).get("outcome"))[0] == "success"
         for key, _label in SCENARIOS
-    ]
-    passed_scenarios = scenario_outcomes.count("success")
-    description = (
-        f"{passed_scenarios}/{len(SCENARIOS)} smoke scenarios passed."
-        if passed
-        else (
-            f"{passed_scenarios}/{len(SCENARIOS)} smoke scenarios passed; "
-            "workflow did not pass."
-        )
     )
+
+
+def _md(value: Any) -> str:
+    # Keep arbitrary package names and scenario values inside their Markdown cell.
+    value = html.escape(_one_line(value), quote=False)
+    for char in "\\|*_[]":
+        value = value.replace(char, "\\" + char)
+    return value
+
+
+def build_github_summary(report: Mapping[str, Any]) -> str:
+    """Render the full CI report independently of Discord and its size limits."""
+    _result, emoji, label = _outcome(report.get("job_result"))
+    lines = [
+        "# CCH Daily Smoke · Testnet",
+        "",
+        f"{emoji} **{label}** · {_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed."
+        f" · ⏱ {_duration(report.get('total_seconds'))}",
+        "",
+        "## Run overview",
+        "",
+        "| Item | Value |",
+        "| --- | --- |",
+    ]
+    started = _started_at(report)
+    metadata = {
+        "Run": f"#{_text(report.get('run_number'))} · attempt {_text(report.get('run_attempt'))}",
+        "Branch": report.get("branch"),
+        "Commit": report.get("sha"),
+        "Fiber source": report.get("fiber_source"),
+        "FNN version": report.get("fnn_version"),
+        "Package": report.get("fnn_package"),
+        "Trigger": report.get("trigger"),
+        "Started": f"{started:%Y-%m-%d %H:%M:%S} CST" if started else "unavailable",
+    }
+    lines.extend(f"| {key} | {_md(value)} |" for key, value in metadata.items())
+    schedule = _schedule_summary(report)
+    if schedule:
+        lines.extend(["", _md(schedule)])
+    run_url = _text(report.get("run_url"), "")
+    if run_url:
+        lines.extend(["", f"[Full run and logs]({run_url})"])
+    lines.extend([
+        "", "## Checks", "", "| Stage | Result |", "| --- | --- |",
+    ])
+    for stage, value in report.get("preflight", {}).items():
+        _normalized, icon, status = _outcome(value)
+        lines.append(f"| {_md(stage)} | {icon} {status} |")
+    lines.extend([
+        "", "## Scenario results", "",
+        "Per-payment hashes, verified assertions and before/after balances appear in the smoke job's summary. "
+        "If a scenario stops early, completed flows remain there; open the failed step's log for the error.",
+    ])
+    for key, scenario_label in SCENARIOS:
+        scenario = report.get("scenarios", {}).get(key, {})
+        _normalized, icon, status = _outcome(scenario.get("outcome"))
+        lines.extend(["", f"### {icon} {scenario_label}", "", f"**{status}**"])
+        data = scenario.get("data")
+        if not data:
+            lines.extend(["", _missing_summary(
+                scenario.get("outcome"), scenario.get("parse_error")
+            )])
+            continue
+        lines.extend([
+            "",
+            f"**Duration:** {_duration(data.get('duration_seconds'))}",
+            "",
+            f"**Topology:** {_md(data.get('topology'))}",
+            "",
+            "| Direction | Paid | Received |",
+            "| --- | --- | --- |",
+        ])
+        flows = data.get("flows", [])
+        if isinstance(flows, list):
+            for flow in flows:
+                if isinstance(flow, Mapping):
+                    lines.append(
+                        f"| {_md(flow.get('direction'))} | {_md(flow.get('paid'))} | {_md(flow.get('received'))} |"
+                    )
+        for field, heading in (("fees", "Fees"), ("net", "Net balance changes")):
+            lines.extend(["", f"**{heading}**", ""])
+            values = data.get(field)
+            if isinstance(values, Mapping):
+                lines.extend(f"- **{_md(name)}:** {_md(value)}" for name, value in values.items())
+            else:
+                lines.append(_md(_compact_value(values)))
+    return "\n".join(lines) + "\n"
+
+
+def build_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Render a short notification linking to the detailed CI report."""
+    result, emoji, _label = _outcome(report.get("job_result"))
+    passed = result == "success"
+    preflight = report.get("preflight", {})
+    problems = [
+        f"{_outcome(value)[1]} {stage}"
+        for stage, value in preflight.items()
+        if _outcome(value)[0] != "success"
+    ]
+    checks = " · ".join(problems) if problems else (
+        "✅ All checks passed" if preflight else "No check results."
+    )
+    fields = [
+        {"name": "Run overview", "value": _truncate(_run_overview(report), FIELD_VALUE_LIMIT), "inline": False},
+        {"name": "Checks", "value": _truncate(checks, FIELD_VALUE_LIMIT), "inline": False},
+        {"name": "Scenarios", "value": _truncate("\n".join(_scenario_lines(report)), FIELD_VALUE_LIMIT), "inline": False},
+    ]
+    description = f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed"
+    description += "." if passed else "; workflow did not pass."
+    description += f" · ⏱ {_duration(report.get('total_seconds'))}"
     embed = {
-        "title": _truncate(
-            f"{result_emoji} CCH Daily Smoke · Testnet · #{run_number}", 256
-        ),
-        "description": _truncate(description, 4096),
+        "title": _truncate(f"{emoji} CCH Daily Smoke · Testnet · #{_one_line(report.get('run_number'), 'unknown')}", 256),
+        "description": description,
         "color": SUCCESS_COLOR if passed else FAILURE_COLOR,
         "fields": fields,
-        "footer": {"text": "Scheduled GitHub Actions report"},
+        "footer": {"text": "Click the title for the full report and logs"},
     }
+    run_url = _text(report.get("run_url"), "")
     if run_url:
         embed["url"] = run_url
-
-    # All individual limits above keep normal reports comfortably under 6,000
-    # characters. Retain a guard so future fields cannot silently exceed the
-    # Discord API's aggregate embed limit.
-    total_chars = (
-        len(embed["title"])
-        + len(embed["description"])
-        + len(embed["footer"]["text"])
-        + sum(len(field["name"]) + len(field["value"]) for field in fields)
-    )
-    if total_chars > EMBED_TOTAL_LIMIT:
-        overflow = total_chars - EMBED_TOTAL_LIMIT
-        for field in reversed(fields):
-            reducible = max(0, len(field["value"]) - 80)
-            reduction = min(reducible, overflow)
-            if reduction:
-                field["value"] = _truncate(
-                    field["value"], len(field["value"]) - reduction
-                )
-                overflow -= reduction
-            if overflow <= 0:
-                break
-
-    return {
-        "allowed_mentions": {"parse": []},
-        "embeds": [embed],
-    }
+    # Three bounded fields + title/description/footer stay below 6,000 UTF-16 units.
+    return {"allowed_mentions": {"parse": []}, "embeds": [embed]}
 
 
 def payload_from_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -396,11 +414,28 @@ def send_discord_webhook(
         raise RuntimeError(f"Discord webhook request failed: {exc.reason}") from exc
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--summary-only", action="store_true", help="Write the full GitHub Actions summary without sending Discord")
+    modes.add_argument("--dry-run", action="store_true", help="Print the Discord payload without sending it")
+    args = parser.parse_args(argv)
+    report = collect_report()
+    if args.summary_only:
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
+        if not summary_path:
+            raise SystemExit("GITHUB_STEP_SUMMARY is required")
+        with Path(summary_path).open("a", encoding="utf-8") as summary:
+            summary.write(build_github_summary(report))
+        print("GitHub Actions daily-smoke summary written")
+        return
+    if args.dry_run:
+        print(json.dumps(build_discord_payload(report), ensure_ascii=False, indent=2))
+        return
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
     if not webhook_url:
         raise SystemExit("DISCORD_WEBHOOK_URL is required")
-    send_discord_webhook(webhook_url, payload_from_env())
+    send_discord_webhook(webhook_url, build_discord_payload(report))
     print("Discord daily-smoke report sent")
 
 

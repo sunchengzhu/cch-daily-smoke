@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from smoke_report import SMOKE_REPORT_MARKER, emit_smoke_report
+from smoke_report import SMOKE_REPORT_MARKER, append_flow_summary, emit_smoke_report
 from test_cch_daily_smoke import build_cch_smoke_report
 from test_fiber_swap_daily_smoke import build_fiber_swap_smoke_report
 from test_fiber_swap_relay_daily_smoke import build_relay_fiber_swap_smoke_report
@@ -63,6 +63,64 @@ def test_emit_smoke_report_rejects_an_incomplete_schema():
 
     with pytest.raises(ValueError, match="must contain exactly"):
         emit_smoke_report(report)
+
+
+def test_flow_summary_appends_each_verified_payment(monkeypatch, tmp_path):
+    github_summary = tmp_path / "summary.md"
+    github_summary.write_text("# Run overview\n\n", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(github_summary))
+    fields = {
+        "scenario": "Example",
+        "direction": "BTC → cWBTC",
+        "money_path": (("BTC leg", "payer → CCH"),),
+        "paid": "payer paid 201 sats",
+        "received": "receiver received 100 raw cWBTC",
+        "fees": {"Fiber": "not exposed", "Lightning": "1 sat"},
+        "balances": (
+            (
+                "Channel",
+                "sats",
+                {"channel_id": "metadata", "payer": 1_000, "payer spendable": 900},
+                {"channel_id": "metadata", "payer": 799, "payer spendable": 699},
+            ),
+        ),
+        "assertions": "Payment settled and balance deltas verified.",
+    }
+
+    first = append_flow_summary(number=1, payment_hash="0xfirst", **fields)
+    assert github_summary.read_text(encoding="utf-8") == (
+        "# Run overview\n\n" + first
+    )
+    second = append_flow_summary(number=2, payment_hash="0xsecond", **fields)
+
+    assert github_summary.read_text(encoding="utf-8") == (
+        "# Run overview\n\n" + first + second
+    )
+    assert "| payer | 1,000 | 799 | -201 |" in first
+    assert "metadata" not in first
+    assert "spendable" not in first
+    assert "**Status:** ✅ Success" in first
+    assert "**Payment hash:** 0xfirst" in first
+
+
+def test_flow_summary_can_render_locally_and_escapes_markdown(monkeypatch):
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    markdown = append_flow_summary(
+        scenario="Example",
+        number=1,
+        direction="BTC → cWBTC",
+        money_path=(("Path", "payer <script>\n→ recipient"),),
+        payment_hash="0x1234",
+        paid="payer paid 1 sat",
+        received="recipient received 1 sat",
+        fees={},
+        balances=(("Channel", "sats", {"node|name": 2}, {"node|name": 1}),),
+        assertions="Passed",
+    )
+
+    assert "payer &lt;script&gt;<br>→ recipient" in markdown
+    assert "| node\\|name | 2 | 1 | -1 |" in markdown
 
 
 def test_local_cch_summary_report_uses_actual_flow_values():

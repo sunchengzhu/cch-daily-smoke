@@ -220,46 +220,54 @@ jobs:
             echo "duration_seconds=$(( $(date +%s) - STARTED_AT ))" >> "$GITHUB_OUTPUT"
           fi
 
-  notify-discord:
+  report:
+    name: Daily smoke report
     runs-on: ubuntu-22.04
     needs: [daily-gate, cch-daily-smoke]
-    if: ${{ always() && (github.event_name == 'schedule' || inputs.send_discord_report) && (needs.daily-gate.outputs.should_run == 'true' || needs.daily-gate.result == 'failure') }}
+    if: ${{ always() && (needs.daily-gate.outputs.should_run == 'true' || needs.daily-gate.result == 'failure') }}
+
+    env:
+      CCH_REPORT_JOB_RESULT: ${{ needs.daily-gate.result == 'failure' && 'failure' || needs.cch-daily-smoke.result }}
+      CCH_REPORT_SMOKE_JOB_RESULT: ${{ needs.cch-daily-smoke.result }}
+      CCH_REPORT_GATE_OUTCOME: ${{ needs.daily-gate.result }}
+      CCH_REPORT_SCHEDULED_DATE: ${{ needs.daily-gate.outputs.scheduled_date }}
+      CCH_REPORT_STARTED_AT: ${{ needs.cch-daily-smoke.outputs.started_at }}
+      CCH_REPORT_TRIGGER: ${{ github.event_name }}
+      CCH_REPORT_BRANCH: ${{ github.ref_name }}
+      CCH_REPORT_FIBER_SOURCE: ${{ inputs.fiber_source || 'release' }}
+      CCH_REPORT_FNN_VERSION: ${{ needs.cch-daily-smoke.outputs.fnn_version }}
+      CCH_REPORT_FNN_PACKAGE: ${{ needs.cch-daily-smoke.outputs.fnn_package }}
+      CCH_REPORT_TOTAL_SECONDS: ${{ needs.cch-daily-smoke.outputs.duration_seconds }}
+      CCH_REPORT_CHECKOUT_OUTCOME: ${{ needs.cch-daily-smoke.outputs.checkout_outcome }}
+      CCH_REPORT_PYTHON_OUTCOME: ${{ needs.cch-daily-smoke.outputs.python_outcome }}
+      CCH_REPORT_DEPENDENCIES_OUTCOME: ${{ needs.cch-daily-smoke.outputs.dependencies_outcome }}
+      CCH_REPORT_UNIT_OUTCOME: ${{ needs.cch-daily-smoke.outputs.unit_outcome }}
+      CCH_REPORT_AUTH_OUTCOME: ${{ needs.cch-daily-smoke.outputs.auth_outcome }}
+      CCH_REPORT_FNN_OUTCOME: ${{ needs.cch-daily-smoke.outputs.fnn_outcome }}
+      CCH_REPORT_LIQUIDITY_OUTCOME: ${{ needs.cch-daily-smoke.outputs.liquidity_outcome }}
+      CCH_REPORT_LOCAL_OUTCOME: ${{ needs.cch-daily-smoke.outputs.local_outcome }}
+      CCH_REPORT_DIRECT_OUTCOME: ${{ needs.cch-daily-smoke.outputs.direct_outcome }}
+      CCH_REPORT_RELAY_OUTCOME: ${{ needs.cch-daily-smoke.outputs.relay_outcome }}
+      CCH_REPORT_CLEANUP_OUTCOME: ${{ needs.cch-daily-smoke.outputs.cleanup_outcome }}
+      CCH_REPORT_LOCAL_JSON: ${{ needs.cch-daily-smoke.outputs.local_report }}
+      CCH_REPORT_DIRECT_JSON: ${{ needs.cch-daily-smoke.outputs.direct_report }}
+      CCH_REPORT_RELAY_JSON: ${{ needs.cch-daily-smoke.outputs.relay_report }}
+      CCH_REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      CCH_REPORT_RUN_NUMBER: ${{ github.run_number }}
+      CCH_REPORT_RUN_ATTEMPT: ${{ github.run_attempt }}
+      CCH_REPORT_SHA: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v7
         continue-on-error: true
 
-      - name: Send scheduled Discord report
+      - name: Write detailed CI report
         if: ${{ always() }}
+        run: python3 scripts/send_daily_smoke_report.py --summary-only
+
+      - name: Send compact Discord report
+        if: ${{ always() && (github.event_name == 'schedule' || inputs.send_discord_report) }}
         continue-on-error: true
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          CCH_REPORT_JOB_RESULT: ${{ needs.daily-gate.result == 'failure' && 'failure' || needs.cch-daily-smoke.result }}
-          CCH_REPORT_GATE_OUTCOME: ${{ needs.daily-gate.result }}
-          CCH_REPORT_SCHEDULED_DATE: ${{ needs.daily-gate.outputs.scheduled_date }}
-          CCH_REPORT_STARTED_AT: ${{ needs.cch-daily-smoke.outputs.started_at }}
-          CCH_REPORT_TRIGGER: ${{ github.event_name }}
-          CCH_REPORT_BRANCH: ${{ github.ref_name }}
-          CCH_REPORT_FIBER_SOURCE: ${{ inputs.fiber_source || 'release' }}
-          CCH_REPORT_FNN_VERSION: ${{ needs.cch-daily-smoke.outputs.fnn_version }}
-          CCH_REPORT_FNN_PACKAGE: ${{ needs.cch-daily-smoke.outputs.fnn_package }}
-          CCH_REPORT_TOTAL_SECONDS: ${{ needs.cch-daily-smoke.outputs.duration_seconds }}
-          CCH_REPORT_CHECKOUT_OUTCOME: ${{ needs.cch-daily-smoke.outputs.checkout_outcome }}
-          CCH_REPORT_PYTHON_OUTCOME: ${{ needs.cch-daily-smoke.outputs.python_outcome }}
-          CCH_REPORT_DEPENDENCIES_OUTCOME: ${{ needs.cch-daily-smoke.outputs.dependencies_outcome }}
-          CCH_REPORT_UNIT_OUTCOME: ${{ needs.cch-daily-smoke.outputs.unit_outcome }}
-          CCH_REPORT_AUTH_OUTCOME: ${{ needs.cch-daily-smoke.outputs.auth_outcome }}
-          CCH_REPORT_FNN_OUTCOME: ${{ needs.cch-daily-smoke.outputs.fnn_outcome }}
-          CCH_REPORT_LIQUIDITY_OUTCOME: ${{ needs.cch-daily-smoke.outputs.liquidity_outcome }}
-          CCH_REPORT_LOCAL_OUTCOME: ${{ needs.cch-daily-smoke.outputs.local_outcome }}
-          CCH_REPORT_DIRECT_OUTCOME: ${{ needs.cch-daily-smoke.outputs.direct_outcome }}
-          CCH_REPORT_RELAY_OUTCOME: ${{ needs.cch-daily-smoke.outputs.relay_outcome }}
-          CCH_REPORT_CLEANUP_OUTCOME: ${{ needs.cch-daily-smoke.outputs.cleanup_outcome }}
-          CCH_REPORT_LOCAL_JSON: ${{ needs.cch-daily-smoke.outputs.local_report }}
-          CCH_REPORT_DIRECT_JSON: ${{ needs.cch-daily-smoke.outputs.direct_report }}
-          CCH_REPORT_RELAY_JSON: ${{ needs.cch-daily-smoke.outputs.relay_report }}
-          CCH_REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CCH_REPORT_RUN_NUMBER: ${{ github.run_number }}
-          CCH_REPORT_RUN_ATTEMPT: ${{ github.run_attempt }}
-          CCH_REPORT_SHA: ${{ github.sha }}
         run: python3 scripts/send_daily_smoke_report.py

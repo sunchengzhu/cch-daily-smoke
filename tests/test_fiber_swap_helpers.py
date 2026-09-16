@@ -623,7 +623,11 @@ def test_settled_lnd_invoice_errors_use_configured_lnd_label(invoice, message):
         )
 
 
-def test_flow_summaries_explain_paths_balances_and_fee_owners(capsys):
+def test_flow_summaries_explain_paths_balances_and_fee_owners(
+    capsys, monkeypatch, tmp_path
+):
+    summary_path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
     lnd_before = {
         "chan_id": "channel",
         "channel_point": "tx:1",
@@ -651,6 +655,11 @@ def test_flow_summaries_explain_paths_balances_and_fee_owners(capsys):
         fiber_before=fiber_before,
         fiber_after=fiber_after_flow_1,
     )
+    first_summary = summary_path.read_text(encoding="utf-8")
+    assert "## FiberSwap direct · FLOW 1 · BTC → cWBTC" in first_summary
+    assert "Amount not exposed by the external API" in first_summary
+    assert "| lnd-d | 10,000 | 9,800 | -200 |" in first_summary
+    assert "**Payment hash:** 0xflow1" in first_summary
     print_flow_2_summary(
         payment_hash="0xflow2",
         btc_principal=200,
@@ -686,3 +695,12 @@ def test_flow_summaries_explain_paths_balances_and_fee_owners(capsys):
     assert "does not expose its final allocation" in output
     assert " FLOW 2 COMPLETE ".center(100, "═") in output
     assert "Before" in output and "After" in output and "Change" in output
+    summary = summary_path.read_text(encoding="utf-8")
+    assert summary.startswith(first_summary)
+    assert "## FiberSwap direct · FLOW 2 · cWBTC → BTC" in summary
+    assert "fiber2 paid 301 raw cWBTC" in summary
+    assert "lnd-d received 200 sats" in summary
+    assert "final allocation not exposed" in summary
+    assert "| fiber2 | 1,100 | 799 | -301 |" in summary
+    assert "spendable" not in summary
+    assert "**Payment hash:** 0xflow2" in summary

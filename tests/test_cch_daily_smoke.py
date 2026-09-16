@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from smoke_report import emit_smoke_report
+from smoke_report import append_flow_summary, emit_smoke_report
 
 CWBTC_SCRIPT = {
     "code_hash": "0x25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
@@ -757,6 +757,45 @@ def print_flow_summary(
             ("lnd-a", lnd_before["lnd_a"], lnd_after["lnd_a"]),
             ("lnd-b", lnd_before["lnd_b"], lnd_after["lnd_b"]),
         ],
+    )
+    append_flow_summary(
+        scenario="Local CCH",
+        number=number,
+        direction=direction,
+        money_path=(("Money path", path),),
+        payment_hash=payment_hash,
+        paid=source_paid,
+        received=destination_received,
+        fees={
+            "CCH service fee": cch_fee_text,
+            "Fiber route fee": fiber_route_fee_text,
+            "Lightning route fee": lightning_route_fee_text,
+        },
+        balances=(
+            (
+                "Fiber balances",
+                "raw cWBTC",
+                {
+                    "fiber2": fiber_before["fiber2"],
+                    "fiber1/CCH": fiber_before["fiber1_cch"],
+                },
+                {
+                    "fiber2": fiber_after["fiber2"],
+                    "fiber1/CCH": fiber_after["fiber1_cch"],
+                },
+            ),
+            (
+                "LND balances",
+                "sats",
+                {"lnd-a": lnd_before["lnd_a"], "lnd-b": lnd_before["lnd_b"]},
+                {"lnd-a": lnd_after["lnd_a"], "lnd-b": lnd_after["lnd_b"]},
+            ),
+        ),
+        assertions=(
+            "Order and payment succeeded, invoice settled, exact payment "
+            "amounts, zero direct routing fees, and both channel balance "
+            "deltas verified."
+        ),
     )
 
 

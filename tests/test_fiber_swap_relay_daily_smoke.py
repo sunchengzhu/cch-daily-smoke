@@ -9,7 +9,7 @@ from dataclasses import dataclass, fields
 
 import pytest
 
-from smoke_report import emit_smoke_report
+from smoke_report import append_flow_summary, emit_smoke_report
 from test_cch_daily_smoke import assert_balance_delta, hex_to_int
 from test_fiber_swap_daily_smoke import (
     FiberSwapSmokeConfig,
@@ -394,28 +394,24 @@ def print_relay_flow_1_summary(
     fiber_before: dict,
     fiber_after: dict,
 ):
-    print_flow_header(
-        1,
-        "BTC → cWBTC via relay LND",
+    money_path = (
         (
-            (
-                "BTC leg",
-                f"{config.lnd_container} --BTC--> Relay LND --BTC--> "
-                "FiberSwap CCH LND",
-            ),
-            (
-                "CCH action",
-                "after its LND receives BTC, FiberSwap CCH tells its FNN "
-                "to pay cWBTC",
-            ),
-            (
-                "cWBTC leg",
-                "FiberSwap FNN (CCH node) --cWBTC--> "
-                "Bottle (Fiber trampoline) --cWBTC--> fiber2",
-            ),
+            "BTC leg",
+            f"{config.lnd_container} --BTC--> Relay LND --BTC--> "
+            "FiberSwap CCH LND",
         ),
-        payment_hash,
+        (
+            "CCH action",
+            "after its LND receives BTC, FiberSwap CCH tells its FNN "
+            "to pay cWBTC",
+        ),
+        (
+            "cWBTC leg",
+            "FiberSwap FNN (CCH node) --cWBTC--> "
+            "Bottle (Fiber trampoline) --cWBTC--> fiber2",
+        ),
     )
+    print_flow_header(1, "BTC → cWBTC via relay LND", money_path, payment_hash)
     print(f"WHO PAID      : {config.lnd_container} paid {lnd_outflow:,} sats")
     print(f"WHO RECEIVED  : fiber2 received {principal:,} raw cWBTC")
     print("FEE OWNERSHIP:")
@@ -439,6 +435,39 @@ def print_relay_flow_1_summary(
     )
     print_balance_table("Fiber channel", "raw cWBTC", fiber_before, fiber_after)
     print_flow_footer(1)
+    append_flow_summary(
+        scenario="FiberSwap relay",
+        number=1,
+        direction="BTC → cWBTC via relay LND",
+        money_path=money_path,
+        payment_hash=payment_hash,
+        paid=f"{config.lnd_container} paid {lnd_outflow:,} sats",
+        received=f"fiber2 received {principal:,} raw cWBTC",
+        fees={
+            "CCH service fee": f"{cch_fee:,} sats; paid by {config.lnd_container}",
+            "Lightning route fee": (
+                f"{lightning_route_fee:,} sats; paid by {config.lnd_container} "
+                "to the relay route"
+            ),
+            "Fiber route fee": (
+                "Amount not exposed by the external API; paid by FiberSwap CCH"
+            ),
+        },
+        balances=(
+            (
+                f"{config.lnd_container} ↔ Relay LND channel",
+                "sats",
+                lnd_before,
+                lnd_after,
+            ),
+            ("Fiber channel", "raw cWBTC", fiber_before, fiber_after),
+        ),
+        assertions=(
+            "Order succeeded, invoice paid, exact principal plus CCH fee, "
+            "two-hop Lightning route through the configured relay, positive "
+            "routing fee within limit, and both channel balance deltas verified."
+        ),
+    )
 
 
 def print_relay_flow_2_summary(
@@ -455,28 +484,24 @@ def print_relay_flow_2_summary(
     fiber_before: dict,
     fiber_after: dict,
 ):
-    print_flow_header(
-        2,
-        "cWBTC → BTC via relay LND",
+    money_path = (
         (
-            (
-                "cWBTC leg",
-                "fiber2 --cWBTC--> Bottle (Fiber trampoline) --cWBTC--> "
-                "FiberSwap FNN (CCH node)",
-            ),
-            (
-                "CCH action",
-                "after its FNN receives cWBTC, FiberSwap CCH tells its LND "
-                "to pay BTC",
-            ),
-            (
-                "BTC leg",
-                "FiberSwap CCH LND --BTC--> Relay LND --BTC--> "
-                f"{config.lnd_container}",
-            ),
+            "cWBTC leg",
+            "fiber2 --cWBTC--> Bottle (Fiber trampoline) --cWBTC--> "
+            "FiberSwap FNN (CCH node)",
         ),
-        payment_hash,
+        (
+            "CCH action",
+            "after its FNN receives cWBTC, FiberSwap CCH tells its LND "
+            "to pay BTC",
+        ),
+        (
+            "BTC leg",
+            "FiberSwap CCH LND --BTC--> Relay LND --BTC--> "
+            f"{config.lnd_container}",
+        ),
     )
+    print_flow_header(2, "cWBTC → BTC via relay LND", money_path, payment_hash)
     print(f"WHO PAID      : fiber2 paid {fiber_total:,} raw cWBTC")
     print(
         f"WHO RECEIVED  : {config.lnd_container} received "
@@ -503,6 +528,41 @@ def print_relay_flow_2_summary(
     )
     print_balance_table("Fiber channel", "raw cWBTC", fiber_before, fiber_after)
     print_flow_footer(2)
+    append_flow_summary(
+        scenario="FiberSwap relay",
+        number=2,
+        direction="cWBTC → BTC via relay LND",
+        money_path=money_path,
+        payment_hash=payment_hash,
+        paid=f"fiber2 paid {fiber_total:,} raw cWBTC",
+        received=f"{config.lnd_container} received {btc_principal:,} sats",
+        fees={
+            "CCH service fee": f"{cch_fee:,} raw cWBTC; paid by fiber2",
+            "Fiber route fee": (
+                f"{fiber_route_fee:,} raw cWBTC; paid by fiber2 across the "
+                "trampoline route; final allocation not exposed"
+            ),
+            "Lightning route fee": (
+                f"{format_msat_as_sats(relay_hint_fee_msat_value)} final-hop "
+                "fee (invoice hint); paid by FiberSwap CCH LND; total not exposed"
+            ),
+        },
+        balances=(
+            (
+                f"{config.lnd_container} ↔ Relay LND channel",
+                "sats",
+                lnd_before,
+                lnd_after,
+            ),
+            ("Fiber channel", "raw cWBTC", fiber_before, fiber_after),
+        ),
+        assertions=(
+            "Order and payment succeeded, exact invoice principal plus CCH "
+            "fee, Fiber routing fee within limit, invoice settled on the "
+            "configured relay channel, exact channel balance deltas, "
+            "and initial local LND/relay channel balances restored."
+        ),
+    )
 
 
 def run_relay_flow_1_btc_to_cwbtc(config: RelayFiberSwapSmokeConfig):
