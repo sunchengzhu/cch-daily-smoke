@@ -19,12 +19,30 @@ AUTH_TOKEN_FILE="${CCH_SMOKE_FNN_AUTH_TOKEN_FILE:-}"
 # is written to a private file. Child processes must never inherit the token.
 unset CCH_SMOKE_FNN_AUTH_TOKEN
 BACKUP_ROOT="${CCH_SMOKE_FNN_BACKUP_ROOT:-/home/ckb/fiber-test/testnet/.binary-backups}"
+# `--check-validate` reads every persisted record, and a release that cannot
+# open the store has been observed to stall for minutes before reporting. Cap
+# it well below the workflow timeout so the rollback below always runs.
+VALIDATION_TIMEOUT="${CCH_SMOKE_FNN_VALIDATION_TIMEOUT:-300}"
 
 TMP_DIR="$(mktemp -d)"
 BACKUP_DIR=""
 SERVICES_STOPPED=0
 BINARIES_REPLACED=0
 CLI_REPLACED=0
+
+# A prerelease may ship without the database migration needed to upgrade the
+# existing node stores (v0.10.0-rc1 did exactly that, and its release notes
+# told operators not to upgrade). The daily job must therefore track published
+# stable releases by default; opting in has to be explicit.
+ALLOW_PRERELEASE="${CCH_SMOKE_FNN_ALLOW_PRERELEASE:-0}"
+case "$ALLOW_PRERELEASE" in
+  0 | 1) ;;
+  *)
+    printf 'CCH_SMOKE_FNN_ALLOW_PRERELEASE must be 0 or 1, got: %s\n' \
+      "$ALLOW_PRERELEASE" >&2
+    exit 1
+    ;;
+esac
 
 log() {
   printf '[fnn-update] %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -72,6 +90,31 @@ wait_for_service() {
   done
   sudo -n journalctl -u "$service" -n 100 --no-pager >&2 || true
   return 1
+}
+
+# Wait for a background pid until an absolute deadline shared by both store
+# validations. `bash` has no `wait` timeout,
+# and a store validation that hangs must not hold the job until the
+# workflow-level timeout kills the step, because that would skip the EXIT trap
+# and leave both Fiber services stopped. Returns 124 on timeout, matching the
+# conventional timeout exit status.
+wait_for_pid_with_timeout() {
+  local pid="$1"
+  local deadline="$2"
+  local now
+  while kill -0 "$pid" 2>/dev/null; do
+    now="$(date +%s)"
+    if [[ "$now" -ge "$deadline" ]]; then
+      set +m
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+  done
+  wait "$pid" 2>/dev/null
 }
 
 start_services() {
@@ -164,12 +207,24 @@ case "$FNN_SOURCE" in
           "https://api.github.com/repos/$REPOSITORY/releases/tags/$RELEASE_TAG"
       )"
     else
-      log "resolving latest published release, including prereleases"
+      if [[ "$ALLOW_PRERELEASE" == "1" ]]; then
+        log "resolving latest published release, including prereleases"
+      else
+        log "resolving latest published stable release, excluding prereleases"
+      fi
+      # The unfiltered newest release may be a prerelease without a database
+      # migration path, so prereleases are excluded unless explicitly allowed.
       RELEASE_JSON="$(
         curl -fsSL --retry 3 \
           "https://api.github.com/repos/$REPOSITORY/releases?per_page=30" \
-          | jq -c '[.[] | select(.draft | not)] | sort_by(.published_at) | last'
+          | jq -c --argjson allow_prerelease "$ALLOW_PRERELEASE" \
+            '[.[] | select(.draft | not) | select($allow_prerelease == 1 or (.prerelease | not))] | sort_by(.published_at) | last'
       )"
+      if [[ -z "$RELEASE_JSON" || "$RELEASE_JSON" == "null" ]]; then
+        printf 'no published stable release found for %s; set CCH_SMOKE_FNN_ALLOW_PRERELEASE=1 to allow prereleases\n' \
+          "$REPOSITORY" >&2
+        exit 1
+      fi
     fi
 
     TARGET_TAG="$(jq -r '.tag_name // empty' <<<"$RELEASE_JSON")"
@@ -325,6 +380,7 @@ if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
 
   log "validating node1 and node2 stores in parallel with $TARGET_TAG"
   VALIDATION_STARTED_AT="$(date +%s)"
+  VALIDATION_DEADLINE="$(( VALIDATION_STARTED_AT + VALIDATION_TIMEOUT ))"
   "$TMP_DIR/fnn" \
     --config "$NODE1_DIR/config.yml" \
     --dir "$NODE1_DIR" \
@@ -336,12 +392,12 @@ if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
     --check-validate >"$TMP_DIR/node2-validation.log" 2>&1 &
   NODE2_VALIDATION_PID=$!
 
-  if wait "$NODE1_VALIDATION_PID"; then
+  if wait_for_pid_with_timeout "$NODE1_VALIDATION_PID" "$VALIDATION_DEADLINE"; then
     NODE1_VALIDATION_STATUS=0
   else
     NODE1_VALIDATION_STATUS=$?
   fi
-  if wait "$NODE2_VALIDATION_PID"; then
+  if wait_for_pid_with_timeout "$NODE2_VALIDATION_PID" "$VALIDATION_DEADLINE"; then
     NODE2_VALIDATION_STATUS=0
   else
     NODE2_VALIDATION_STATUS=$?
@@ -353,6 +409,11 @@ if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
 
   if [[ "$NODE1_VALIDATION_STATUS" != "0" \
     || "$NODE2_VALIDATION_STATUS" != "0" ]]; then
+    if [[ "$NODE1_VALIDATION_STATUS" == "124" \
+      || "$NODE2_VALIDATION_STATUS" == "124" ]]; then
+      printf 'database validation timed out after %ss (node1=%s, node2=%s)\n' \
+        "$VALIDATION_TIMEOUT" "$NODE1_VALIDATION_STATUS" "$NODE2_VALIDATION_STATUS" >&2
+    fi
     printf '%s\n' \
       "database validation failed (node1=$NODE1_VALIDATION_STATUS, node2=$NODE2_VALIDATION_STATUS)" \
       "The new binary may require a migration. No binary was replaced." \

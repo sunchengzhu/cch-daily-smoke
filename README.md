@@ -365,13 +365,17 @@ write("cch");
 
 每日 smoke 前会运行 `scripts/update_fnn.sh`：
 
-- 定时任务和手动任务默认从 `nervosnetwork/fiber` 选择发布时间最新的 release，
-  包括 prerelease。
+- 定时任务和手动任务默认只选择**稳定版**发布包，跳过 prerelease。升级是就地
+  替换节点二进制，而 prerelease 可能尚未提供数据库迁移（例如 `v0.10.0-rc1`
+  的说明写明不支持从旧版本升级），因此不会自动装到跑着的节点上。
+- 需要验证 prerelease 时，手动触发把 `fiber_allow_prerelease` 设为 `true`，
+  脚本才会在展开候选时包含 prerelease；draft 始终排除。
 - 手动触发参数 `fiber_source` 可选择 `release`、`develop` 或 `pr`。`release`
-  表示 GitHub Releases 列表中发布时间最新的发布包；`develop` 会读取
+  表示 GitHub Releases 列表中最新的发布包（默认稳定版）；`develop` 会读取
   `https://github-test-logs.ckbapp.dev/fiber/fnn.conf` 中的 `TARBALL_develop`。
   选择 `pr` 时还需填写 `fiber_pr_number`，例如 `1607`，脚本会读取
   `TARBALL_pr1607` 并校验下载包确实属于该 PR。
+- `develop` 和 `pr` 通道按定义就是未发布代码，不受 prerelease 开关影响。
 - release 包会校验 GitHub 提供的 SHA-256；develop 和 PR 包通过 HTTPS 下载并
   记录 SHA-256，但上游未提供摘要，因此无法做外部摘要比对。
 - `fnn` 版本无变化时不重启；只有 `fnn-cli` 落后时直接更新 CLI，不扫描数据库。
@@ -387,8 +391,9 @@ write("cch");
 先备份数据，再按照对应版本的 migration guide 手动执行。`v0.9.x` 已内置统一迁移
 系统；只有早于统一迁移 epoch 的数据库才需要使用 `v0.8.x` 的 `fnn-migrate`。
 
-`release` 模式可通过 `CCH_SMOKE_FNN_RELEASE_TAG` 指定发布标签；未指定时自动选择
-最新发布版本。
+`release` 模式可通过 `CCH_SMOKE_FNN_RELEASE_TAG` 指定发布标签；未指定时自动
+选择最新的稳定版发布。环境变量 `CCH_SMOKE_FNN_ALLOW_PRERELEASE=1` 可放开
+prerelease（等价于手动触发的 `fiber_allow_prerelease`），仅接受 `0` 或 `1`。
 
 ## 验证内容
 
