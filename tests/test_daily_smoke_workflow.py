@@ -82,3 +82,29 @@ def test_fnn_metadata_outputs_are_emitted_before_fallible_update_stages():
 
     assert package_output < download
     assert version_output < service_update < rpc_health
+
+
+def test_relay_failure_class_reaches_the_report_job():
+    """An environment fault must be able to surface in the Discord report."""
+
+    workflow = workflow_text()
+    job = workflow.split("  cch-daily-smoke:\n", 1)[1].split("\n  report:\n", 1)[0]
+    report_job = workflow.split("\n  report:\n", 1)[1]
+
+    assert "id: fiberswap_relay" in job
+    assert "relay_failure_class: ${{ steps.fiberswap_relay.outputs.failure_class }}" in job
+    assert "CCH_REPORT_FAILURE_CLASS: ${{ needs.cch-daily-smoke.outputs.relay_failure_class }}" in report_job
+
+
+def test_failure_diagnostics_reach_the_report_job_for_each_external_scenario():
+    workflow = workflow_text()
+    for scenario in ("direct", "relay"):
+        assert (
+            f"{scenario}_diagnostic: ${{{{ steps.fiberswap_{scenario}.outputs.failure_diagnostic }}}}"
+            in workflow
+        )
+        assert (
+            f"CCH_REPORT_{scenario.upper()}_DIAGNOSTIC: ${{{{ needs.cch-daily-smoke.outputs.{scenario}_diagnostic }}}}"
+            in workflow
+        )
+    assert 'CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID: "5637388530143199233"' in workflow

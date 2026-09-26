@@ -6,13 +6,22 @@ import json
 import os
 import time
 from dataclasses import dataclass, fields
+from types import SimpleNamespace
 
 import pytest
 
 from smoke_report import append_flow_summary, emit_smoke_report
+from relay_reconnect import recover_relay_peer
+from smoke_failure_class import (
+    EnvironmentUnavailable,
+    emit_failure_class,
+    emit_failure_diagnostic,
+    failure_phase,
+)
 from test_cch_daily_smoke import assert_balance_delta, hex_to_int
 from test_fiber_swap_daily_smoke import (
     FiberSwapSmokeConfig,
+    build_fiber_swap_failure_diagnostic,
     canonical_hash,
     create_fiber_invoice,
     create_swap_order,
@@ -60,6 +69,8 @@ DEFAULT_RELAY_LND_PUBKEY = (
 DEFAULT_RELAY_CHANNEL_POINT = (
     "0cedcc728ba1a51582c6650fc14f1a862912ee4ea400a94049c83326b7e5408e:1"
 )
+# This is the second hop, relay LND ↔ FiberSwap LND. The first hop's SCID is
+# independently read from the configured local-LND/relay-LND channel.
 DEFAULT_RELAY_TO_FIBER_SWAP_SCID = "5637388530143199233"
 
 
@@ -116,6 +127,43 @@ class RelayFiberSwapSmokeConfig(FiberSwapSmokeConfig):
         return config
 
 
+class RelayChannelInactive(AssertionError):
+    """An existing first-hop channel is inactive; the cause is not yet known."""
+
+
+def reconnect_inactive_relay(config):
+    """Only repair a disconnected peer for the existing pinned channel."""
+    try:
+        get_relay_lnd_channel(config)
+        return []
+    except RelayChannelInactive:
+        pass
+    local = config.lnd_container
+    source = os.environ.get(
+        "CCH_FIBER_SWAP_RELAY_GOSSIP_LND_CONTAINER",
+        os.environ.get("CCH_FIBER_SWAP_LND_D_CONTAINER", "lnd-d"),
+    ).strip()
+    sources = [local]
+    # A global custom CLI prefix targets the same node regardless of container.
+    # Do not label a second query through that prefix as independent gossip.
+    if source and source != local and not os.environ.get("CCH_FIBER_SWAP_LND_D_LNCLI_PREFIX"):
+        sources.append(source)
+
+    def query(container, args, timeout):
+        selected = SimpleNamespace(**{**vars(config), "lnd_container": container})
+        return fiber_swap_lncli_json(selected, args, timeout=timeout)
+
+    def connect(address, timeout):
+        return fiber_swap_lncli_raw(
+            config,
+            ["connect", "--timeout", f"{max(1, int(timeout) - 2)}s",
+             f"{config.relay_lnd_pubkey}@{address}"],
+            timeout=timeout,
+        )
+
+    return recover_relay_peer(config.relay_lnd_pubkey, sources, query, connect)
+
+
 def get_relay_lnd_channel(config: RelayFiberSwapSmokeConfig):
     channels = fiber_swap_lncli_json(config, ["listchannels"]).get("channels", [])
     matching_peer = [
@@ -140,11 +188,14 @@ def get_relay_lnd_channel(config: RelayFiberSwapSmokeConfig):
             }
             for channel in matching_peer
         ]
-        raise AssertionError(
+        message = (
             "expected the configured local-LND/relay-LND channel to exist "
             f"and be active at {config.lnd_channel_point}; available: "
             f"{json.dumps(available, sort_keys=True)}"
         )
+        if len(matches) == 1:
+            raise RelayChannelInactive(message)
+        raise AssertionError(message)
     return matches[0]
 
 
@@ -152,23 +203,29 @@ def wait_relay_lnd_channel_quiescent(config: RelayFiberSwapSmokeConfig):
     deadline = time.monotonic() + config.wait_timeout
     last_pending = None
     last_error = None
+    last_exception = None
     while time.monotonic() < deadline:
         try:
             channel = get_relay_lnd_channel(config)
             last_error = None
+            last_exception = None
         except Exception as exc:  # listchannels is a read-only query.
             last_error = f"{type(exc).__name__}: {exc}"
+            last_exception = exc
             time.sleep(2)
             continue
         last_pending = channel.get("pending_htlcs") or []
         if not last_pending:
             return channel
         time.sleep(2)
-    raise AssertionError(
+    message = (
         "timed out waiting for local-LND/relay-LND HTLCs to settle; "
         f"pending HTLCs: {json.dumps(last_pending, sort_keys=True)}; "
         f"last read error: {last_error}"
     )
+    if isinstance(last_exception, RelayChannelInactive):
+        raise RelayChannelInactive(message) from last_exception
+    raise AssertionError(message)
 
 
 def relay_lnd_balances(config: RelayFiberSwapSmokeConfig):
@@ -196,11 +253,19 @@ def wait_relay_lnd_balance_delta(
     )
 
 
-def validate_relay_to_fiber_swap_channel(config: RelayFiberSwapSmokeConfig):
-    channel = fiber_swap_lncli_json(
-        config, ["getchaninfo", config.relay_to_fiber_swap_scid]
-    )
-    assert str(channel.get("channel_id")) == config.relay_to_fiber_swap_scid
+def validate_relay_to_fiber_swap_channel(
+    config: RelayFiberSwapSmokeConfig, scid: str
+):
+    """Validate the independently configured relay-LND/FiberSwap-LND edge."""
+
+    try:
+        channel = fiber_swap_lncli_json(config, ["getchaninfo", scid])
+    except AssertionError as exc:
+        raise AssertionError(
+            f"local LND cannot resolve relay-LND/FiberSwap-LND SCID {scid} "
+            f"in its public graph; this does not establish a service fault: {exc}"
+        ) from exc
+    assert str(channel.get("channel_id")) == scid
     endpoints = {channel.get("node1_pub"), channel.get("node2_pub")}
     assert endpoints == {
         config.relay_lnd_pubkey,
@@ -225,6 +290,7 @@ def expected_relay_route(
     amount: int,
     outgoing_chan_id: str,
     local_route_ids: set[str],
+    relay_scid: str,
 ):
     result = fiber_swap_lncli_json(
         config,
@@ -243,8 +309,7 @@ def expected_relay_route(
             and hops[0].get("pub_key") == config.relay_lnd_pubkey
             and str(hops[0].get("chan_id")) in local_route_ids
             and hops[1].get("pub_key") == config.fiber_swap_lnd_pubkey
-            and str(hops[1].get("chan_id"))
-            == config.relay_to_fiber_swap_scid
+            and str(hops[1].get("chan_id")) == relay_scid
         ):
             fee = int(route.get("total_fees", "0"))
             fee_msat_value = route.get("total_fees_msat")
@@ -274,6 +339,7 @@ def verify_lnd_relay_payment(
     payment: dict,
     expected_value: int,
     local_route_ids: set[str],
+    relay_scid: str,
 ):
     value = int(payment.get("value_sat", "0"))
     fee = int(payment.get("fee_sat", "0"))
@@ -306,10 +372,7 @@ def verify_lnd_relay_payment(
         assert hops[0].get("pub_key") == config.relay_lnd_pubkey
         assert str(hops[0].get("chan_id")) in local_route_ids
         assert hops[1].get("pub_key") == config.fiber_swap_lnd_pubkey
-        assert (
-            str(hops[1].get("chan_id"))
-            == config.relay_to_fiber_swap_scid
-        )
+        assert str(hops[1].get("chan_id")) == relay_scid
     return value + fee, fee
 
 
@@ -565,7 +628,7 @@ def print_relay_flow_2_summary(
     )
 
 
-def run_relay_flow_1_btc_to_cwbtc(config: RelayFiberSwapSmokeConfig):
+def run_relay_flow_1_btc_to_cwbtc(config: RelayFiberSwapSmokeConfig, relay_scid: str):
     """Pay BTC from the local LND through relay LND and receive cWBTC."""
 
     principal = config.amount_sats
@@ -606,7 +669,7 @@ def run_relay_flow_1_btc_to_cwbtc(config: RelayFiberSwapSmokeConfig):
     assert lightning_total == principal + cch_fee
     assert decoded["amount"] == lightning_total
     expected_relay_route(
-        config, lightning_total, outgoing_chan_id, local_route_ids
+        config, lightning_total, outgoing_chan_id, local_route_ids, relay_scid
     )
 
     require_spendable(
@@ -644,6 +707,7 @@ def run_relay_flow_1_btc_to_cwbtc(config: RelayFiberSwapSmokeConfig):
         lnd_payment,
         lightning_total,
         local_route_ids,
+        relay_scid,
     )
     wait_order_success(config, payment_hash)
     wait_fiber_invoice_paid(config, payment_hash)
@@ -950,36 +1014,266 @@ def build_relay_fiber_swap_smoke_report(
     }
 
 
-def test_fiber_swap_via_relay_lnd_bidirectional():
-    started_at = time.monotonic()
-    config = RelayFiberSwapSmokeConfig.from_env()
+def _diagnostic_text(value, limit=360):
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
-    info = fiber_swap_lncli_json(config, ["getinfo"])
-    local_lnd_pubkey = info["identity_pubkey"]
-    if config.lnd_d_pubkey:
-        assert local_lnd_pubkey == config.lnd_d_pubkey
-    assert info.get("synced_to_chain") is True
-    assert info.get("synced_to_graph") is True
-    fiber_swap_fnn(config, ["info"])
-    wait_relay_lnd_channel_quiescent(config)
-    validate_relay_to_fiber_swap_channel(config)
-    wait_fiber_channel_quiescent(config)
+
+def collect_relay_failure_diagnostic(config, error):
+    """Snapshot both hops after failure, without submitting payments or repairs.
+
+    Each independent read is bounded, so a disconnected first hop cannot hide
+    the second-hop graph state. These later observations never reclassify the
+    original failure or prove that a remote service is healthy.
+    """
+
+    inner_phase = getattr(error, "smoke_phase", "unknown")
+    phases = getattr(error, "smoke_phases", [inner_phase])
+    stage = next(
+        (phase for phase in reversed(phases) if phase.startswith("preflight.")
+         or phase in {"flow1", "flow2", "reconciliation", "configuration"}),
+        inner_phase,
+    )
+    diagnostic = {
+        "scope": {
+            "preflight.local-relay-link": "local-relay-link",
+            "preflight.relay-fiberswap-link": "relay-fiberswap-link",
+            "preflight.local-lnd": "local-lnd",
+            "preflight.fiber-link": "local-fiber-link",
+            "configuration": "configuration",
+            "flow1": "swap-flow",
+            "flow2": "swap-flow",
+            "reconciliation": "swap-flow",
+        }.get(stage, "unknown"),
+        "phase": stage if inner_phase == stage else f"{stage} / {inner_phase}",
+        "summary": _diagnostic_text(error),
+        "evidence": [],
+        "next_action": "Inspect the original failing stage and both channel endpoints; "
+        "the later snapshots alone do not identify the cause.",
+        "fiberswap_assessment": "FiberSwap service health is undetermined; "
+        "graph observations do not establish live connectivity or swap execution.",
+    }
+    if config is None:
+        diagnostic["next_action"] = "Correct the reported smoke configuration before rerunning."
+        return diagnostic
+
+    probes = (
+        ("peers", ["listpeers"]),
+        ("channels", ["listchannels"]),
+        ("relay_node", ["getnodeinfo", "--pub_key", config.relay_lnd_pubkey]),
+        ("second_hop", ["getchaninfo", config.relay_to_fiber_swap_scid]),
+    )
+    snapshots = {}
+    evidence = diagnostic["evidence"]
+    evidence.extend(getattr(error, "relay_reconnect_notes", []))
+    peer_state = "unknown"
+    channel_state = "unknown"
+    second_hop_state = "graph unavailable"
+    for name, args in probes:
+        try:
+            result = fiber_swap_lncli_json(config, args, timeout=5)
+            if not isinstance(result, dict):
+                raise ValueError("expected a JSON object")
+            snapshots[name] = result
+        except (Exception, pytest.fail.Exception) as exc:
+            evidence.append(f"{name} probe unavailable: {_diagnostic_text(exc)}")
+            if name == "second_hop" and "zombie" in str(exc).lower():
+                second_hop_state = "zombie in local graph"
+
+    peers = snapshots.get("peers")
+    peer_connected = None
+    if peers is not None:
+        peer_connected = any(
+            peer.get("pub_key") == config.relay_lnd_pubkey
+            for peer in peers.get("peers", [])
+        )
+        peer_state = "present" if peer_connected else "absent"
+        evidence.append(
+            "Relay peer in local LND listpeers: "
+            + peer_state
+        )
+
+    channels = snapshots.get("channels")
+    if channels is not None:
+        matches = [channel for channel in channels.get("channels", [])
+                   if channel.get("channel_point") == config.lnd_channel_point
+                   and channel.get("remote_pubkey") == config.relay_lnd_pubkey]
+        if len(matches) != 1:
+            channel_state = "no unique channel match"
+            evidence.append(
+                "Configured first-hop channel/peer match count: "
+                f"{len(matches)}; channel_point={config.lnd_channel_point}"
+            )
+            if stage == "preflight.local-relay-link":
+                diagnostic.update(
+                    scope="configuration",
+                    summary="Configured first-hop channel/peer does not match local channels.",
+                    next_action="Verify the configured channel point and relay identity "
+                    "against local and relay listchannels; check whether the channel was closed "
+                    "or replaced. This is not proof of a disconnected peer.",
+                )
+        else:
+            channel = matches[0]
+            if isinstance(channel.get("active"), bool):
+                channel_state = json.dumps(channel["active"])
+            evidence.append(
+                "First hop: " + json.dumps({
+                    key: channel.get(key) for key in (
+                        "channel_point", "scid", "chan_id", "active", "chan_status_flags"
+                    )
+                }, sort_keys=True)
+            )
+            if stage == "preflight.local-relay-link" and channel.get("active") is False:
+                summary = "First hop is inactive."
+                if peer_connected is False:
+                    summary = "First hop is inactive; relay peer is absent from local LND."
+                elif peer_connected is True:
+                    summary = "First hop is inactive despite a connected relay peer."
+                diagnostic.update(
+                    summary=summary,
+                    next_action="Runner: test the currently advertised relay addresses; "
+                    "ask FiberSwap operations to compare its Rainbow peer address and "
+                    "channel state. Restore the existing relay connection, then verify "
+                    "both hops.",
+                )
+
+    node = snapshots.get("relay_node")
+    if node is not None:
+        addresses = (node.get("node") or {}).get("addresses") or []
+        evidence.append(
+            "Relay advertised addresses (reachability not tested): "
+            + _diagnostic_text(json.dumps(addresses, sort_keys=True), 500)
+        )
+
+    edge = snapshots.get("second_hop")
+    if edge is not None:
+        endpoints = {edge.get("node1_pub"), edge.get("node2_pub")}
+        expected = {config.relay_lnd_pubkey, config.fiber_swap_lnd_pubkey}
+        if endpoints != expected or str(edge.get("channel_id")) != config.relay_to_fiber_swap_scid:
+            second_hop_state = "graph identity mismatch"
+            evidence.append(
+                "Second-hop graph identity mismatch: " + _diagnostic_text(json.dumps({
+                    key: edge.get(key) for key in (
+                        "channel_id", "chan_point", "node1_pub", "node2_pub"
+                    )
+                }, sort_keys=True), 500)
+            )
+            if stage == "preflight.relay-fiberswap-link":
+                diagnostic.update(
+                    scope="configuration",
+                    summary="Configured second-hop SCID has unexpected channel endpoints.",
+                    next_action="Ask the relay/FiberSwap operator for their shared channel "
+                    "point and SCID, and correct the second-hop configuration independently "
+                    "of the local first-hop SCID.",
+                )
+        else:
+            policies = []
+            compact_policies = []
+            disabled_owners = []
+            for side in ("node1", "node2"):
+                owner = "relay" if edge[f"{side}_pub"] == config.relay_lnd_pubkey else "FiberSwap"
+                policy = edge.get(f"{side}_policy")
+                disabled = policy.get("disabled") if isinstance(policy, dict) else None
+                policies.append(f"{owner} disabled={json.dumps(disabled)}")
+                disabled_state = json.dumps(disabled) if isinstance(disabled, bool) else "unknown"
+                compact_policies.append(f"{owner} disabled={disabled_state}")
+                if disabled is True:
+                    disabled_owners.append(owner)
+            second_hop_state = "endpoints match, " + ", ".join(compact_policies) + " (graph only)"
+            evidence.append(
+                f"Second-hop graph: SCID={config.relay_to_fiber_swap_scid}; "
+                "endpoints match; " + "; ".join(policies)
+                + "; live connectivity remains unknown."
+            )
+            if stage == "preflight.relay-fiberswap-link" and disabled_owners:
+                diagnostic.update(
+                    summary="Second-hop graph policy is disabled by "
+                    + " and ".join(disabled_owners) + ".",
+                    next_action="Ask the indicated endpoint operator to inspect its "
+                    "channel/peer state and current outgoing policy, then verify fresh "
+                    "gossip at local LND; a disabled policy does not prove an API fault.",
+                    fiberswap_assessment="Disabled outgoing policy announced by "
+                    + " and ".join(disabled_owners)
+                    + "; this does not prove a FiberSwap API fault.",
+                )
+    elif stage == "preflight.relay-fiberswap-link":
+        diagnostic.update(
+            summary="Local LND could not read the configured second-hop graph edge: "
+            + _diagnostic_text(error, 220),
+            next_action="Check the relay/FiberSwap channel point and SCID at both endpoints, "
+            "then compare fresh channel announcements/updates with local LND's graph. "
+            "A zombie/missing edge is a graph observation, not proof of a service failure.",
+        )
+
+    evidence.insert(
+        0,
+        f"First hop: peer={peer_state}, active={channel_state}; "
+        f"second hop: {second_hop_state}.",
+    )
+    if inner_phase in {"fiberswap-api", "fiberswap-response", "fiberswap-order", "flow2-settlement"}:
+        product_diagnostic = build_fiber_swap_failure_diagnostic(config, error)
+        product_diagnostic["evidence"] = (
+            evidence[:1] + product_diagnostic.get("evidence", []) + evidence[1:]
+        )
+        return product_diagnostic
+    return diagnostic
+
+
+def _run_relay_smoke(config: RelayFiberSwapSmokeConfig, started_at: float):
+    """Run the relay scenario; separated so the entry point can classify faults."""
+
+    with failure_phase("preflight.local-lnd"):
+        info = fiber_swap_lncli_json(config, ["getinfo"])
+        local_lnd_pubkey = info["identity_pubkey"]
+        if config.lnd_d_pubkey:
+            assert local_lnd_pubkey == config.lnd_d_pubkey
+        assert info.get("synced_to_chain") is True
+        assert info.get("synced_to_graph") is True
+    with failure_phase("preflight.fiber-link"):
+        fiber_swap_fnn(config, ["info"])
+    with failure_phase("preflight.local-relay-link"):
+        reconnect_notes = []
+        try:
+            if os.environ.get("CCH_FIBER_SWAP_RELAY_RECOVERY_PREPARED") != "1":
+                reconnect_notes = reconnect_inactive_relay(config)
+        except (Exception, pytest.fail.Exception) as error:
+            # Best-effort preparation cannot replace the original channel check.
+            reconnect_notes.append(f"Relay recovery unavailable: {error}")
+        for note in reconnect_notes:
+            print(f"RELAY_RECONNECT: {note}", flush=True)
+        try:
+            wait_relay_lnd_channel_quiescent(config)
+        except RelayChannelInactive as exc:
+            error = EnvironmentUnavailable(str(exc))
+            error.relay_reconnect_notes = reconnect_notes
+            raise error from exc
+        except (Exception, pytest.fail.Exception) as error:
+            error.relay_reconnect_notes = reconnect_notes
+            raise
+    relay_scid = config.relay_to_fiber_swap_scid
+    with failure_phase("preflight.relay-fiberswap-link"):
+        validate_relay_to_fiber_swap_channel(config, relay_scid)
+    with failure_phase("preflight.fiber-link"):
+        wait_fiber_channel_quiescent(config)
 
     print_asset_convention(config.lnd_network)
     print_fiber_swap_topology_key()
     print_relay_topology_key(config)
-    flow_1 = run_relay_flow_1_btc_to_cwbtc(config)
-    flow_2 = run_relay_flow_2_cwbtc_to_btc(
-        config,
-        flow_1,
-        local_lnd_pubkey,
-    )
+    with failure_phase("flow1"):
+        flow_1 = run_relay_flow_1_btc_to_cwbtc(config, relay_scid)
+    with failure_phase("flow2"):
+        flow_2 = run_relay_flow_2_cwbtc_to_btc(
+            config,
+            flow_1,
+            local_lnd_pubkey,
+        )
 
     expected_fiber_net = flow_1["principal"] - flow_2["fiber_total"]
     actual_fiber_net = (
         flow_2["fiber_after"]["fiber2"] - flow_1["fiber_before"]["fiber2"]
     )
-    assert actual_fiber_net == expected_fiber_net
+    with failure_phase("reconciliation"):
+        assert actual_fiber_net == expected_fiber_net
 
     print("\n" + "=" * 100)
     print("DAILY ROUND SUMMARY: both FiberSwap CCH relay-LND directions passed")
@@ -1001,3 +1295,23 @@ def test_fiber_swap_via_relay_lnd_bidirectional():
             flow_2,
         )
     )
+
+
+def test_fiber_swap_via_relay_lnd_bidirectional():
+    started_at = time.monotonic()
+    config = None
+    try:
+        with failure_phase("configuration"):
+            config = RelayFiberSwapSmokeConfig.from_env()
+        _run_relay_smoke(config, started_at)
+    except (Exception, pytest.fail.Exception) as exc:
+        # Reporting must never replace the original exception or traceback.
+        try:
+            emit_failure_class(exc)
+        except (Exception, pytest.fail.Exception) as reporting_error:
+            print(f"WARNING: failure classification could not be written: {reporting_error}")
+        try:
+            emit_failure_diagnostic(collect_relay_failure_diagnostic(config, exc))
+        except (Exception, pytest.fail.Exception) as reporting_error:
+            print(f"WARNING: failure diagnostics could not be written: {reporting_error}")
+        raise

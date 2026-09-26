@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import time
+import traceback
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from smoke_report import append_flow_summary, emit_smoke_report
+from smoke_failure_class import emit_failure_diagnostic, failure_phase
 from test_cch_daily_smoke import (
     CWBTC_SCRIPT,
     assert_balance_delta,
@@ -170,6 +172,7 @@ def invoice_string(value, kind: str) -> str:
     raise AssertionError(f"missing {kind} invoice in API response: {value!r}")
 
 
+@failure_phase("local-fiber-rpc")
 def fiber_swap_fnn(config: FiberSwapSmokeConfig, args: list[str], timeout=None):
     base_cmd = [
         config.fnn_cli,
@@ -205,21 +208,24 @@ def fiber_swap_lncli_prefix(config: FiberSwapSmokeConfig) -> list[str]:
 def fiber_swap_lncli_json(
     config: FiberSwapSmokeConfig, args: list[str], timeout=None
 ):
-    return parse_json(
-        run_cmd(
-            fiber_swap_lncli_prefix(config) + args,
-            timeout or config.command_timeout,
+    with failure_phase(f"local-lnd:{args[0]}"):
+        return parse_json(
+            run_cmd(
+                fiber_swap_lncli_prefix(config) + args,
+                timeout or config.command_timeout,
+            )
         )
-    )
 
 
 def fiber_swap_lncli_raw(config: FiberSwapSmokeConfig, args: list[str], timeout=None):
-    return run_cmd(
-        fiber_swap_lncli_prefix(config) + args,
-        timeout or config.command_timeout,
-    )
+    with failure_phase(f"local-lnd:{args[0]}"):
+        return run_cmd(
+            fiber_swap_lncli_prefix(config) + args,
+            timeout or config.command_timeout,
+        )
 
 
+@failure_phase("fiberswap-api")
 def api_json(
     config: FiberSwapSmokeConfig,
     method: str,
@@ -247,9 +253,14 @@ def api_json(
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise AssertionError(
+        error = AssertionError(
             f"FiberSwap API {method} {path} returned HTTP {exc.code}: {body}"
-        ) from exc
+        )
+        try:
+            error.smoke_api_response = json.loads(body)
+        except ValueError:
+            pass
+        raise error from exc
     except urllib.error.URLError as exc:
         raise AssertionError(
             f"FiberSwap API {method} {path} failed: {exc.reason}"
@@ -288,6 +299,7 @@ def create_swap_order(
         return order
 
 
+@failure_phase("fiberswap-response")
 def validate_new_order(
     order: dict,
     payment_hash: str,
@@ -350,10 +362,12 @@ def wait_terminal_status(
         if status == success:
             return last
         if status in failures:
-            raise AssertionError(
+            error = AssertionError(
                 f"{description} entered terminal failure {status}: "
                 f"{json.dumps(last, sort_keys=True)}"
             )
+            error.smoke_status = status
+            raise error
         time.sleep(interval)
     raise AssertionError(
         f"timed out waiting for {description} to become {success}; "
@@ -361,6 +375,7 @@ def wait_terminal_status(
     )
 
 
+@failure_phase("fiberswap-order")
 def wait_order_success(config: FiberSwapSmokeConfig, payment_hash: str):
     return wait_terminal_status(
         f"FiberSwap order {payment_hash}",
@@ -479,6 +494,7 @@ def wait_lnd_invoice_settled(
     )
 
 
+@failure_phase("flow2-settlement")
 def wait_flow_2_success(
     config: FiberSwapSmokeConfig,
     payment_hash: str,
@@ -493,6 +509,7 @@ def wait_flow_2_success(
     order = None
     lnd_invoice = None
     read_errors: dict[str, str] = {}
+    summary = {}
 
     while time.monotonic() < deadline:
         reads = (
@@ -537,6 +554,7 @@ def wait_flow_2_success(
         order = values["FiberSwap order"]
         lnd_invoice = values[f"{lnd_label} invoice"]
         summary = {
+            "payment_hash": payment_hash,
             "fiber": {
                 "status": (fiber_payment or {}).get("status"),
                 "failed_error": (fiber_payment or {}).get("failed_error"),
@@ -558,10 +576,12 @@ def wait_flow_2_success(
             or order_status == "Failed"
             or lnd_state in {"CANCELED", "EXPIRED"}
         ):
-            raise AssertionError(
+            error = AssertionError(
                 "FLOW 2 entered a terminal failure: "
                 + json.dumps(summary, sort_keys=True)
             )
+            error.smoke_observations = summary
+            raise error
 
         if (
             fiber_status == "Success"
@@ -577,10 +597,12 @@ def wait_flow_2_success(
 
         time.sleep(2)
 
-    raise AssertionError(
+    error = AssertionError(
         "timed out waiting for FLOW 2 to succeed: "
         + json.dumps(summary, sort_keys=True)
     )
+    error.smoke_observations = summary
+    raise error
 
 
 def get_lnd_channel(config: FiberSwapSmokeConfig):
@@ -1596,28 +1618,35 @@ def build_fiber_swap_smoke_report(duration_seconds, flow_1, flow_2):
     }
 
 
-def test_fiber_swap_bidirectional():
-    started_at = time.monotonic()
-    config = FiberSwapSmokeConfig.from_env()
-
-    info = fiber_swap_lncli_json(config, ["getinfo"])
-    assert info["identity_pubkey"] == config.lnd_d_pubkey
-    assert info.get("synced_to_chain") is True
-    assert info.get("synced_to_graph") is True
+def _run_direct_smoke(config: FiberSwapSmokeConfig, started_at: float):
+    with failure_phase("preflight.local-lnd"):
+        info = fiber_swap_lncli_json(config, ["getinfo"])
+        assert info["identity_pubkey"] == config.lnd_d_pubkey, (
+            f"local LND identity mismatch: expected {config.lnd_d_pubkey}, got {info['identity_pubkey']}"
+        )
+        assert info.get("synced_to_chain") is True, "local LND is not synced to chain"
+        assert info.get("synced_to_graph") is True, "local LND is not synced to graph"
     fiber_swap_fnn(config, ["info"])
-    wait_lnd_channel_quiescent(config)
-    wait_fiber_channel_quiescent(config)
+    with failure_phase("preflight.direct-fiberswap-link"):
+        wait_lnd_channel_quiescent(config)
+    with failure_phase("preflight.fiber-link"):
+        wait_fiber_channel_quiescent(config)
 
     print_asset_convention(config.lnd_network)
     print_fiber_swap_topology_key()
-    flow_1 = run_flow_1_btc_to_cwbtc(config)
-    flow_2 = run_flow_2_cwbtc_to_btc(config, flow_1)
+    with failure_phase("flow1"):
+        flow_1 = run_flow_1_btc_to_cwbtc(config)
+    with failure_phase("flow2"):
+        flow_2 = run_flow_2_cwbtc_to_btc(config, flow_1)
 
     expected_fiber_net = flow_1["principal"] - flow_2["fiber_total"]
     actual_fiber_net = (
         flow_2["fiber_after"]["fiber2"] - flow_1["fiber_before"]["fiber2"]
     )
-    assert actual_fiber_net == expected_fiber_net
+    with failure_phase("reconciliation"):
+        assert actual_fiber_net == expected_fiber_net, (
+            f"Fiber net balance mismatch: {actual_fiber_net} != {expected_fiber_net}"
+        )
 
     print("\n" + "=" * 100)
     print("DAILY ROUND SUMMARY: both FiberSwap CCH directions passed")
@@ -1637,3 +1666,146 @@ def test_fiber_swap_bidirectional():
             flow_2,
         )
     )
+
+
+def build_fiber_swap_failure_diagnostic(config, error: BaseException) -> dict:
+    """Name the observed operation; do not infer remote blame from a timeout."""
+
+    phase = getattr(error, "smoke_phase", "unknown")
+    message = " ".join(str(error).split()) or type(error).__name__
+    if len(message) > 800:
+        message = message[:400] + " … " + message[-397:]
+    diagnostic = {
+        "scope": "unknown",
+        "phase": phase,
+        "summary": "FiberSwap smoke failed; responsible component is unconfirmed.",
+        "evidence": [message],
+        "fiberswap_assessment": "Unknown; the failed assertion alone does not establish FiberSwap fault.",
+        "next_action": "Use the reported phase and error to compare local node and FiberSwap order logs.",
+    }
+    frames = traceback.extract_tb(error.__traceback__)
+    if frames:
+        frame = frames[-1]
+        diagnostic["evidence"].append(f"Failed at {frame.name} ({Path(frame.filename).name}:{frame.lineno})")
+    if phase == "fiberswap-api":
+        cause = error.__cause__
+        diagnostic["evidence"].append(f"API endpoint: {config.api_base_url}")
+        if isinstance(cause, urllib.error.HTTPError):
+            diagnostic.update(
+                scope="fiberswap-api",
+                summary=f"FiberSwap HTTP endpoint returned HTTP {cause.code}.",
+                fiberswap_assessment=(
+                    "Server error observed at the FiberSwap HTTP endpoint; backend/proxy cause unconfirmed."
+                    if 500 <= cause.code <= 599 else
+                    "The endpoint rejected the request; request/configuration versus service cause is unconfirmed."
+                ),
+                next_action="FiberSwap operator: correlate the reported API request with API/backend logs.",
+            )
+            response = getattr(error, "smoke_api_response", None)
+            if isinstance(response, dict) and response.get("upstream") is True:
+                upstream_error = response.get("error", "")
+                if isinstance(upstream_error, str) and "FNN RPC error" in upstream_error:
+                    diagnostic.update(
+                        scope="fiberswap-fnn",
+                        summary="FiberSwap upstream FNN rejected the operation.",
+                        fiberswap_assessment="FiberSwap reports an upstream FNN failure; inspect its node and channel state.",
+                        next_action="FiberSwap operator: correlate this request with upstream FNN RPC and channel logs.",
+                    )
+                    if "Insufficient balance" in upstream_error and "max outbound liquidity" in upstream_error:
+                        diagnostic.update(
+                            summary="FiberSwap upstream FNN reported insufficient outbound liquidity.",
+                            fiberswap_assessment="Remote FNN routing rejected the amount; balance depletion versus unavailable channels is not yet established.",
+                            next_action="FiberSwap operator: check outbound cWBTC channel readiness, spendable balance and pending TLCs, including the route toward Bottle.",
+                        )
+        elif isinstance(cause, json.JSONDecodeError):
+            diagnostic.update(
+                scope="fiberswap-api",
+                summary="FiberSwap HTTP endpoint returned invalid JSON.",
+                fiberswap_assessment="Unexpected endpoint response observed; API/proxy response needs investigation.",
+                next_action="Check the response and FiberSwap API/proxy logs for the reported request.",
+            )
+        else:
+            diagnostic.update(
+                scope="runner-fiberswap-api",
+                summary="Runner could not complete a FiberSwap API request.",
+                fiberswap_assessment="Unknown: runner network, DNS/TLS, or remote service availability may be responsible.",
+                next_action="Check the reported connection error from the runner and correlate FiberSwap API logs.",
+            )
+    elif phase == "fiberswap-response":
+        diagnostic.update(
+            scope="fiberswap-api",
+            summary="FiberSwap order response did not match the submitted request or expected state.",
+            next_action="Compare the reported response fields and request with FiberSwap order/API logs.",
+        )
+    elif phase == "fiberswap-order":
+        failed = getattr(error, "smoke_status", None) == "Failed"
+        diagnostic.update(
+            scope="fiberswap-order",
+            summary="FiberSwap reported a failed order." if failed else "FiberSwap order did not reach Success before timeout.",
+            fiberswap_assessment="FiberSwap order path requires investigation; its dependencies may be the underlying cause.",
+            next_action="FiberSwap operator: inspect the payment hash in the evidence and the CCH/FNN/LND order logs.",
+        )
+    elif phase == "flow2-settlement":
+        observations = getattr(error, "smoke_observations", {})
+        diagnostic["scope"] = "payment-settlement"
+        diagnostic["summary"] = "FLOW 2 settlement did not complete as expected."
+        diagnostic["evidence"].insert(0, json.dumps(observations, sort_keys=True))
+        order = observations.get("order", {})
+        fiber = observations.get("fiber", {})
+        if order.get("status") == "Failed" or (
+            fiber.get("status") == "Success" and order.get("status") != "Success"
+        ):
+            diagnostic["fiberswap_assessment"] = (
+                "FiberSwap settlement path requires investigation; remote LND/dependency cause is not established."
+            )
+        diagnostic["next_action"] = (
+            "Correlate Fiber payment, FiberSwap order and receiving LND invoice states using the payment hash in the run log."
+        )
+    elif "preflight.direct-fiberswap-link" in getattr(error, "smoke_phases", []):
+        diagnostic.update(
+            scope="local-fiberswap-link",
+            summary="Local LND to FiberSwap LND channel preflight failed.",
+            fiberswap_assessment="Unknown: this checks a shared link, not which endpoint caused the failure.",
+            next_action="Check local LND connectivity; ask the FiberSwap operator to compare peer and channel status at their end.",
+        )
+        for args in (["listpeers"], ["listchannels"]):
+            try:
+                result = fiber_swap_lncli_json(config, args, timeout=5)
+                if args[0] == "listpeers":
+                    peers = [p for p in result.get("peers", []) if p.get("pub_key") == config.fiber_swap_lnd_pubkey]
+                    value = [{k: p.get(k) for k in ("address", "inbound")} for p in peers]
+                else:
+                    channels = [c for c in result.get("channels", []) if c.get("channel_point") == config.lnd_channel_point]
+                    value = [{k: c.get(k) for k in ("channel_point", "active", "scid", "chan_status_flags")} for c in channels]
+                diagnostic["evidence"].append(f"{args[0]}: {json.dumps(value, sort_keys=True)}")
+            except (Exception, pytest.fail.Exception) as probe_error:
+                diagnostic["evidence"].append(f"{args[0]} unavailable: {str(probe_error)[:300]}")
+    elif phase == "local-fiber-rpc" or phase == "preflight.fiber-link":
+        diagnostic.update(
+            scope="local-fiber",
+            summary="Local Fiber RPC or Fiber channel preflight failed.",
+            fiberswap_assessment="No remote FiberSwap fault established by this local check.",
+            next_action="Check the local Fiber node RPC, authentication, channel and peer state before remote escalation.",
+        )
+    elif phase == "preflight.local-lnd" or phase.startswith("local-lnd:"):
+        diagnostic.update(
+            scope="local-lnd",
+            summary="Local LND operation failed.",
+            next_action="Inspect the reported lncli error and local LND logs; payment/routing errors may involve remote dependencies.",
+        )
+    return diagnostic
+
+
+def test_fiber_swap_bidirectional():
+    started_at = time.monotonic()
+    config = None
+    try:
+        with failure_phase("configuration"):
+            config = FiberSwapSmokeConfig.from_env()
+        _run_direct_smoke(config, started_at)
+    except (Exception, pytest.fail.Exception) as error:
+        try:
+            emit_failure_diagnostic(build_fiber_swap_failure_diagnostic(config, error))
+        except (Exception, pytest.fail.Exception) as diagnostic_error:
+            print(f"Could not collect failure diagnostic: {diagnostic_error}", flush=True)
+        raise

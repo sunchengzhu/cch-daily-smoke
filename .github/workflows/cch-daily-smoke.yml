@@ -82,6 +82,9 @@ jobs:
       local_outcome: ${{ steps.local_cch.outcome }}
       direct_outcome: ${{ steps.fiberswap_direct.outcome }}
       relay_outcome: ${{ steps.fiberswap_relay.outcome }}
+      relay_failure_class: ${{ steps.fiberswap_relay.outputs.failure_class }}
+      direct_diagnostic: ${{ steps.fiberswap_direct.outputs.failure_diagnostic }}
+      relay_diagnostic: ${{ steps.fiberswap_relay.outputs.failure_diagnostic }}
       cleanup_outcome: ${{ steps.cleanup_auth.outcome }}
       local_report: ${{ steps.local_cch.outputs.report }}
       direct_report: ${{ steps.fiberswap_direct.outputs.report }}
@@ -117,6 +120,14 @@ jobs:
       CCH_FIBER_SWAP_LND_CHANNEL_POINT: 70fdfd0dd7960b1b7ca1f562ae031b3a37925fa957eb97c97536f82ed5f37c35:1
       CCH_FIBER_SWAP_BOTTLE_PUBKEY: 02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71
       CCH_FIBER_SWAP_FIBER_CHANNEL_ID: "0x4b6513e2d1ad8341366d3b0733f00306aee7e2db21e669a30aba5d33a1ed5536"
+
+      CCH_FIBER_SWAP_RELAY_LND_CONTAINER: lnd-c
+      CCH_FIBER_SWAP_RELAY_NODE_PUBKEY: 03676dd479c6c5422bdcec4691f42f1a6c6b386519b431542e03f31e773d570a41
+      CCH_FIBER_SWAP_RELAY_CHANNEL_POINT: 0cedcc728ba1a51582c6650fc14f1a862912ee4ea400a94049c83326b7e5408e:1
+      # Second hop: Rainbow Dash ↔ FiberSwap. The first hop's SCID is read
+      # separately from lnd-c's channel selected by channel point.
+      CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID: "5637388530143199233"
+      CCH_FIBER_SWAP_RELAY_LND_FEE_LIMIT_SATS: "80"
 
     steps:
       - name: Start report timer
@@ -183,6 +194,11 @@ jobs:
         id: lnd_liquidity
         run: python scripts/ensure_lnd_liquidity.py
 
+      - name: Prepare relay peer connectivity
+        id: relay_connectivity
+        continue-on-error: true
+        run: python scripts/prepare_relay_connectivity.py
+
       - name: Run local CCH smoke
         id: local_cch
         run: |
@@ -199,11 +215,7 @@ jobs:
         id: fiberswap_relay
         env:
           CCH_FIBER_SWAP_RELAY_SMOKE_ENABLED: "1"
-          CCH_FIBER_SWAP_RELAY_LND_CONTAINER: lnd-c
-          CCH_FIBER_SWAP_RELAY_NODE_PUBKEY: 03676dd479c6c5422bdcec4691f42f1a6c6b386519b431542e03f31e773d570a41
-          CCH_FIBER_SWAP_RELAY_CHANNEL_POINT: 0cedcc728ba1a51582c6650fc14f1a862912ee4ea400a94049c83326b7e5408e:1
-          CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID: "5637388530143199233"
-          CCH_FIBER_SWAP_RELAY_LND_FEE_LIMIT_SATS: "80"
+          CCH_FIBER_SWAP_RELAY_RECOVERY_PREPARED: "1"
         run: |
           python -m pytest -q -s --no-header \
             tests/test_fiber_swap_relay_daily_smoke.py::test_fiber_swap_via_relay_lnd_bidirectional
@@ -254,6 +266,9 @@ jobs:
       CCH_REPORT_LOCAL_OUTCOME: ${{ needs.cch-daily-smoke.outputs.local_outcome }}
       CCH_REPORT_DIRECT_OUTCOME: ${{ needs.cch-daily-smoke.outputs.direct_outcome }}
       CCH_REPORT_RELAY_OUTCOME: ${{ needs.cch-daily-smoke.outputs.relay_outcome }}
+      CCH_REPORT_FAILURE_CLASS: ${{ needs.cch-daily-smoke.outputs.relay_failure_class }}
+      CCH_REPORT_DIRECT_DIAGNOSTIC: ${{ needs.cch-daily-smoke.outputs.direct_diagnostic }}
+      CCH_REPORT_RELAY_DIAGNOSTIC: ${{ needs.cch-daily-smoke.outputs.relay_diagnostic }}
       CCH_REPORT_CLEANUP_OUTCOME: ${{ needs.cch-daily-smoke.outputs.cleanup_outcome }}
       CCH_REPORT_LOCAL_JSON: ${{ needs.cch-daily-smoke.outputs.local_report }}
       CCH_REPORT_DIRECT_JSON: ${{ needs.cch-daily-smoke.outputs.direct_report }}
