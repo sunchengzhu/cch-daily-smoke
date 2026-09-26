@@ -23,7 +23,7 @@ def test_discord_report_runs_for_daily_claim_or_gate_failure():
 
     assert "send_discord_report:" in workflow
     assert "default: false" in workflow
-    assert "(github.event_name == 'schedule' || inputs.send_discord_report)" in workflow
+    assert "(github.event_name == 'schedule' || inputs.scheduled_date != '' || inputs.send_discord_report)" in workflow
     assert "(needs.daily-gate.outputs.should_run == 'true' || needs.daily-gate.result == 'failure')" in workflow
     assert "needs.cch-daily-smoke.result == 'failure'" not in workflow
 
@@ -62,7 +62,8 @@ def test_ci_summary_is_independent_of_discord_and_written_before_notification():
     assert "if: ${{ always() }}" in summary
     assert "scripts/send_daily_smoke_report.py --summary-only" in summary
     assert "send_discord_report" not in summary
-    assert "(github.event_name == 'schedule' || inputs.send_discord_report)" in notification
+    assert "(github.event_name == 'schedule' || inputs.scheduled_date != '' || inputs.send_discord_report)" in notification
+    assert "inputs.send_discord_report" in notification
     assert "continue-on-error: true" in notification
     assert "DISCORD_WEBHOOK_URL" in notification
 

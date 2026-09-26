@@ -34,7 +34,7 @@ GitHub Actions 的 **Summary** 页面保存完整报告：`Daily smoke report` �
 
 Discord 只发送一张简短卡片，包含通过数、总耗时、开始时间、FNN 版本、检查异常和
 三组场景状态。点击卡片标题即可打开该次 CI 的完整报告和日志。完整报告不依赖
-Discord 开关或 webhook；普通手动运行也会生成，重复调度被 gate 跳过时不重复生成。
+Discord 通知或 webhook；普通手动运行也会生成，重复调度被 gate 跳过时不重复生成。
 
 服务器/网络、GitHub API 或 runner 繁忙仍可能
 造成延迟；FNN 升级时的数据库校验也会增加报告耗时，不应为了准点而跳过校验。
@@ -44,8 +44,9 @@ Discord 开关或 webhook；普通手动运行也会生成，重复调度被 gat
 实际派发权限验证，服务器定时器已安装并启用；GitHub 定时兜底继续保留。
 部署与排查见 [服务器调度说明](docs/daily-smoke-scheduler.md)。
 
-需要临时预览卡片时，可以手动运行 workflow 并勾选 `send_discord_report`；该开关
-默认关闭，未勾选的普通手动运行仍不会发送。
+GitHub `schedule` 和服务器携带 `scheduled_date` 派发的每日任务自动发送 Discord。
+普通手动运行默认只生成 GitHub Summary；需要测试通知时，勾选
+`send_discord_report`（命令行传 `-f send_discord_report=true`），本次运行也会发送。
 
 需要在仓库中配置：
 
@@ -89,12 +90,41 @@ FLOW 1: lnd-c → relay LND → FiberSwap CCH LND
 FLOW 2: FiberSwap CCH LND → relay LND → lnd-c
 ```
 
-relay 测试会锁定 `lnd-c ↔ relay LND` channel point 和
-`relay LND ↔ FiberSwap CCH LND` SCID，并校验实际两跳路径。FLOW 2 使用
+relay 测试会锁定 `lnd-c ↔ relay LND` channel point，并从该通道
+读回第一跳 SCID。第二跳 `relay LND ↔ FiberSwap CCH LND` 则使用
+`CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID`，同时验证两端公钥；两跳不能共用编号。FLOW 2 使用
 `--private` 和 `86400` 秒 expiry 创建 `lnd-c` invoice；invoice route hint 必须指向
 指定 relay LND 且包含非零转发费，从而覆盖 FNN v0.9+ 的 CCH Lightning 路由费流程。
 日志会显示 route hint 中最后一跳要求的费用；FiberSwap CCH LND 实际支付的整条
 Lightning 路由总费用未由外部 API 暴露。
+
+relay 使用公共节点 Rainbow Dash。`lnd-c` 曾通过出站连接建立第一跳；
+没有公告入站地址本身并不能证明故障原因。
+
+CI 在三个支付场景之前独立执行 `Prepare relay peer connectivity`：先尝试恢复连接，
+再用 20 秒等待原通道 active 且没有 pending HTLC。结果写入该步骤日志和 GitHub Summary。
+该准备步骤失败不会阻止 direct；direct 创建订单失败也不会再挡住连接恢复。
+连接 ready 不代表 relay 支付通过，后续 relay 场景仍执行完整检查；CI 不重复拨号。
+
+第一跳原通道 inactive 且 relay peer 不在线时，预检会读取 `lnd-c` 和 `lnd-d`
+保存的同一公钥公告，按 `last_update` 从新到旧尝试去重后的公网 IP。
+这能处理 Rainbow 换 IP、断连节点仍持有旧公告的情况，不依赖写死 IP 或 1ML。
+最多尝试 4 个地址，整个恢复过程限时 45 秒；不会断开已有 peer。
+只尝试公网 IPv4/IPv6 字面地址，私网、域名和 onion 地址不会自动拨号。
+每次使用固定公钥进行同步连接，随后核对 peer；原 channel point、第二跳 SCID
+和全部支付断言继续生效。地址来源、更新时间、尝试及结果写入 `RELAY_RECONNECT`
+日志，失败时也进入详细诊断。两个节点都没有新地址或对端离线时仍需运维处理。
+
+第一跳预检不可用时仍令 CI 失败，
+报告会注明 **Environment unavailable**；付款开始后的断言失败不会因此被降级。
+
+direct / relay 失败时，Discord 和 GitHub summary 展示失败位置、证据、
+FiberSwap 归因及下一步。relay 会额外执行限时只读检查，分别记录第一跳 peer/
+通道、公告地址及第二跳 graph（第一跳失败也继续查第二跳）。
+graph policy 正常仅说明本地图记录可用，不证明远端通道在线；连接失败或超时也
+不能单独证明 FiberSwap 有问题。同一轮 direct 通过会作为对照显示，不会覆盖
+relay 失败或其他步骤失败。API 服务端错误、订单失败则明确引导检查 FiberSwap
+API / CCH 日志。详细原始错误仍保留在失败步骤日志中。
 
 这里的 `CCH action` 是两笔支付的协调边界，不是 LND 与 FNN 之间的一条资金通道；
 BTC 不会直接变成 FNN 数据，cWBTC 也不会直接进入 LND。
@@ -215,10 +245,11 @@ workflow 会固定下面这些值，以保证测试命中刚刚验证过的节�
 | `CCH_FIBER_SWAP_FIBER_CHANNEL_ID` | `0x4b6513e2…ed5536` | `fiber2 ↔ Bottle (Fiber trampoline)` cWBTC 通道 |
 | `CCH_FIBER_SWAP_RELAY_SMOKE_ENABLED` | relay workflow step 中为 `1` | 明确启用 relay-LND live test |
 | `CCH_FIBER_SWAP_RELAY_LND_CONTAINER` | `lnd-c` | relay 测试使用的本地付款/收款 LND 容器 |
+| `CCH_FIBER_SWAP_RELAY_GOSSIP_LND_CONTAINER` | direct LND 容器（默认 `lnd-d`） | 查询新 relay 公告的辅助节点；空值禁用辅助查询。设置自定义 `CCH_FIBER_SWAP_LND_D_LNCLI_PREFIX` 时只查询该前缀对应节点，避免误当作独立来源 |
 | `CCH_FIBER_SWAP_RELAY_LOCAL_LND_PUBKEY` | unset | 可选的 `lnd-c` 身份公钥固定值；未设置时使用 `getinfo` 返回值 |
 | `CCH_FIBER_SWAP_RELAY_NODE_PUBKEY` | `03676dd4…70a41` | 公共 relay LND 身份公钥 |
 | `CCH_FIBER_SWAP_RELAY_CHANNEL_POINT` | `0cedcc72…5408e:1` | 唯一允许使用的 `lnd-c ↔ relay LND` 通道 outpoint |
-| `CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID` | `5637388530143199233` | 唯一允许使用的 `relay LND ↔ FiberSwap CCH LND` 公有通道 SCID |
+| `CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID` | `5637388530143199233` | 第二跳 `relay LND ↔ FiberSwap CCH LND` 通道 SCID；用于 graph 端点和两跳路由校验，与第一跳独立 |
 | `CCH_FIBER_SWAP_RELAY_LND_FEE_LIMIT_SATS` | `80` | FLOW 1 两跳 Lightning 支付允许的路由费上限 |
 
 公钥和 channel id 在实际 workflow 中保存完整值；上表为了可读性只缩写了较长的值。
@@ -226,6 +257,25 @@ workflow 会固定下面这些值，以保证测试命中刚刚验证过的节�
 它强制 FLOW 1 的首跳，同时检查 FLOW 2 invoice 中的私有 route hint。
 
 ## 手动运行
+
+在 Actions 选择 **cch daily smoke**（`cch-daily-smoke.yml`），再点击 **Run workflow**。
+手动测试和每日自动任务共用这个工作流；日期留空即可手动运行，不占用当天日报名额。
+
+- 普通回归：日期和 PR 编号留空，版本选 `release`；想测试 Discord 时勾选通知。
+- 测试 Fiber PR：例如 `nervosnetwork/fiber#1607`，版本选 `pr`，编号只填 `1607`。
+- 测试本仓库 PR：在 **Use workflow from** 选择对应分支；FNN 仍可选 `release`，不要把本仓库 PR 编号填到 Fiber PR 栏。
+
+```bash
+gh workflow run cch-daily-smoke.yml \
+  --repo sunchengzhu/cch-daily-smoke \
+  --ref main \
+  -f fiber_source=release \
+  -f send_discord_report=false
+```
+
+> 手动触发页面上每个参数的中文备注、默认值、什么时候该动哪个，见
+> [`docs/manual-trigger-parameters.md`](docs/manual-trigger-parameters.md)。
+> 日常只需要「直接 Run workflow」，想测 rc 就勾 `fiber_allow_prerelease`。
 
 ```bash
 cd /Users/sunchengzhu/project/cch-daily-smoke
@@ -380,8 +430,10 @@ write("cch");
   记录 SHA-256，但上游未提供摘要，因此无法做外部摘要比对。
 - `fnn` 版本无变化时不重启；只有 `fnn-cli` 落后时直接更新 CLI，不扫描数据库。
 - `fnn` 有新版本时先停止 `fiber-testnet1.service` 和 `fiber-testnet2.service`。
-- 使用新 `fnn --check-validate` 并行检查两个节点的数据库。只有确认不需要迁移时，
-  才备份并替换两个节点的 `fnn`，同时更新 node1 的 `fnn-cli`。
+- 使用新 `fnn --check-validate` 并行检查两个节点的数据库，默认 300 秒超时
+  （`CCH_SMOKE_FNN_VALIDATION_TIMEOUT` 可调）。只有确认不需要迁移时，
+  才备份并替换两个节点的 `fnn`，同时更新 node1 的 `fnn-cli`。超时按校验失败
+  处理，避免卡死耗到 workflow 上限后跳过回滚、把两个服务留在停服状态。
 - 当前 develop 和 PR 包不包含 `fnn-cli`，选择这两类包时会保留 node1 已安装的
   CLI。
 - 启动服务并等待两个 RPC 返回版本、commit 和 pubkey，成功后才运行 smoke。
