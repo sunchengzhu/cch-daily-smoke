@@ -22,6 +22,9 @@ from test_fiber_swap_relay_daily_smoke import (
     wait_relay_lnd_channel_quiescent,
 )
 
+# The public relay-LND/FiberSwap-LND SCID is independent of the first hop.
+RELAY_SCID = DEFAULT_RELAY_TO_FIBER_SWAP_SCID
+
 
 def test_relay_config_uses_lnd_c_and_pinned_route_defaults(monkeypatch):
     monkeypatch.setenv("CCH_FIBER_SWAP_FNN_CLI", sys.executable)
@@ -93,7 +96,9 @@ def test_expected_relay_route_requires_exact_two_hop_path(monkeypatch):
         relay_to_fiber_swap_scid=DEFAULT_RELAY_TO_FIBER_SWAP_SCID,
     )
 
-    assert expected_relay_route(config, 200, "111", {"111", "112"}) == wanted
+    assert expected_relay_route(
+        config, 200, "111", {"111", "112"}, RELAY_SCID
+    ) == wanted
     assert calls == [
         [
             "queryroutes",
@@ -135,7 +140,7 @@ def test_expected_relay_route_rejects_zero_fee(monkeypatch):
     )
 
     with pytest.raises(AssertionError, match="positive relay fee"):
-        expected_relay_route(config, 200, "111", {"111"})
+        expected_relay_route(config, 200, "111", {"111"}, RELAY_SCID)
 
 
 def test_expected_relay_route_rejects_a_sub_sat_fee(monkeypatch):
@@ -166,7 +171,7 @@ def test_expected_relay_route_rejects_a_sub_sat_fee(monkeypatch):
     )
 
     with pytest.raises(AssertionError, match="whole-sat Lightning fee"):
-        expected_relay_route(config, 200, "111", {"111"})
+        expected_relay_route(config, 200, "111", {"111"}, RELAY_SCID)
 
 
 def test_relay_payment_requires_same_two_hop_route_and_positive_fee():
@@ -198,11 +203,11 @@ def test_relay_payment_requires_same_two_hop_route_and_positive_fee():
         ],
     }
 
-    assert verify_lnd_relay_payment(config, payment, 200, {"111"}) == (201, 1)
+    assert verify_lnd_relay_payment(config, payment, 200, {"111"}, RELAY_SCID) == (201, 1)
 
     payment["htlcs"][0]["route"]["hops"][1]["chan_id"] = "999"
     with pytest.raises(AssertionError):
-        verify_lnd_relay_payment(config, payment, 200, {"111"})
+        verify_lnd_relay_payment(config, payment, 200, {"111"}, RELAY_SCID)
 
 
 def test_relay_payment_rejects_a_sub_sat_fee():
@@ -236,7 +241,7 @@ def test_relay_payment_rejects_a_sub_sat_fee():
     }
 
     with pytest.raises(AssertionError, match="whole-sat Lightning fee"):
-        verify_lnd_relay_payment(config, payment, 200, {"111"})
+        verify_lnd_relay_payment(config, payment, 200, {"111"}, RELAY_SCID)
 
 
 def test_relay_hint_fee_includes_base_and_proportional_fee():
@@ -387,12 +392,12 @@ def test_public_relay_channel_requires_expected_endpoints_and_enabled_policies(
         fiber_swap_lnd_pubkey=DEFAULT_FIBER_SWAP_LND_PUBKEY,
     )
 
-    assert validate_relay_to_fiber_swap_channel(config) == channel
+    assert validate_relay_to_fiber_swap_channel(config, RELAY_SCID) == channel
     assert calls == [["getchaninfo", DEFAULT_RELAY_TO_FIBER_SWAP_SCID]]
 
     channel["node1_policy"]["disabled"] = True
     with pytest.raises(AssertionError, match="disabled node1_policy"):
-        validate_relay_to_fiber_swap_channel(config)
+        validate_relay_to_fiber_swap_channel(config, RELAY_SCID)
 
 
 def test_wait_relay_channel_retries_a_transient_inactive_state(monkeypatch):
@@ -457,3 +462,52 @@ def test_relay_lnd_balance_wait_retries_stale_and_pending_snapshots(monkeypatch)
 
     assert result["Local LND"] == 799
     assert result["Relay LND"] == 701
+
+
+# The local-LND/relay-LND channel observed on 2026-09-25 (the first hop).
+LIVE_CHANNEL_SCID = "5636281321933307905"
+RELAY_CHANNEL_POINT = (
+    "0cedcc728ba1a51582c6650fc14f1a862912ee4ea400a94049c83326b7e5408e:1"
+)
+
+
+def relay_channel(**overrides):
+    channel = {
+        "channel_point": RELAY_CHANNEL_POINT,
+        "remote_pubkey": DEFAULT_RELAY_LND_PUBKEY,
+        "chan_id": "8e40e5b72633c84940a900a44eee1229861a4fc10f65c68215a5a18b72cced0d",
+        "scid": LIVE_CHANNEL_SCID,
+        "active": True,
+        "local_balance": "26429",
+        "remote_balance": "200101",
+    }
+    channel.update(overrides)
+    return channel
+
+
+def test_first_hop_outgoing_scid_is_distinct_from_public_second_hop():
+    assert relay.lnd_outgoing_chan_id(relay_channel()) == LIVE_CHANNEL_SCID
+    assert DEFAULT_RELAY_TO_FIBER_SWAP_SCID == "5637388530143199233"
+    assert LIVE_CHANNEL_SCID != DEFAULT_RELAY_TO_FIBER_SWAP_SCID
+
+
+def test_inactive_channel_does_not_assume_a_disconnected_peer(monkeypatch):
+
+    monkeypatch.setattr(
+        relay,
+        "fiber_swap_lncli_json",
+        lambda _config, _args: {"channels": [relay_channel(active=False)]},
+    )
+    config = SimpleNamespace(
+        relay_lnd_pubkey=DEFAULT_RELAY_LND_PUBKEY,
+        lnd_channel_point=RELAY_CHANNEL_POINT,
+    )
+
+    with pytest.raises(relay.RelayChannelInactive) as excinfo:
+        relay.get_relay_lnd_channel(config)
+
+    message = str(excinfo.value)
+    assert RELAY_CHANNEL_POINT in message
+    assert LIVE_CHANNEL_SCID in message
+    assert "not connected" not in message
+    assert "environmental" not in message

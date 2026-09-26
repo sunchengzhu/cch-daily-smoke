@@ -23,8 +23,15 @@ from typing import Any
 
 SUCCESS_COLOR = 0x2ECC71
 FAILURE_COLOR = 0xE74C3C
+ENVIRONMENT_COLOR = 0xE67E22
 EMBED_TOTAL_LIMIT = 6000
 FIELD_VALUE_LIMIT = 1024
+
+# Mirrors tests/smoke_failure_class.py. The report runs as a plain script where
+# the tests directory is not importable, so the value is repeated here; a unit
+# test keeps the two definitions in sync.
+ENVIRONMENT_UNAVAILABLE = "environment-unavailable"
+FAILURE_CLASS_ENV = "CCH_REPORT_FAILURE_CLASS"
 
 SCENARIOS = (
     ("local", "Local CCH"),
@@ -158,6 +165,29 @@ def _parse_scenario(raw: Any) -> tuple[Mapping[str, Any] | None, str | None]:
     return parsed, None
 
 
+def _diagnostic(value: Any) -> dict[str, Any]:
+    """Accept only the diagnostic schema; never infer a cause from bad input."""
+    text_fields = ("scope", "phase", "summary", "next_action", "fiberswap_assessment")
+    if (
+        isinstance(value, Mapping)
+        and all(isinstance(value.get(key), str) and value[key].strip() for key in text_fields)
+        and isinstance(value.get("evidence"), list)
+        and all(isinstance(item, str) and item.strip() for item in value["evidence"])
+    ):
+        return {
+            **{key: value[key].strip() for key in text_fields},
+            "evidence": value["evidence"] or ["No diagnostic evidence captured."],
+        }
+    return {
+        "scope": "unknown",
+        "phase": "unknown",
+        "summary": "Failure cause unknown; diagnostic missing or invalid.",
+        "evidence": ["No valid structured failure diagnostic was produced."],
+        "next_action": "Inspect the failed step's log and capture its diagnostic before retrying.",
+        "fiberswap_assessment": "Unknown: the available diagnostic cannot determine FiberSwap's involvement.",
+    }
+
+
 def collect_report(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Collect typed report data from the documented environment variables."""
 
@@ -174,14 +204,17 @@ def collect_report(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     for key, _label in SCENARIOS:
         prefix = f"CCH_REPORT_{key.upper()}"
         data, error = _parse_scenario(env.get(f"{prefix}_JSON"))
+        diagnostic, _diagnostic_error = _parse_scenario(env.get(f"{prefix}_DIAGNOSTIC"))
         scenarios[key] = {
             "outcome": stage_outcome(f"{prefix}_OUTCOME"),
             "data": data,
             "parse_error": error,
+            "diagnostic": _diagnostic(diagnostic),
         }
 
     return {
         "job_result": env.get("CCH_REPORT_JOB_RESULT", "unknown"),
+        "failure_class": env.get(FAILURE_CLASS_ENV, "").strip(),
         "branch": env.get("CCH_REPORT_BRANCH", "unknown"),
         "fiber_source": env.get("CCH_REPORT_FIBER_SOURCE", "unknown"),
         "fnn_version": env.get("CCH_REPORT_FNN_VERSION", "unknown"),
@@ -267,20 +300,121 @@ def _md(value: Any) -> str:
     return value
 
 
+def _is_environment_unavailable(report: Mapping[str, Any]) -> bool:
+    """Scope the relay classification to that failure, preserving other failures."""
+    scenarios = report.get("scenarios", {})
+    return (
+        _outcome(report.get("job_result"))[0] == "failure"
+        and str(report.get("failure_class", "")) == ENVIRONMENT_UNAVAILABLE
+        and _outcome(scenarios.get("relay", {}).get("outcome"))[0] == "failure"
+        and all(
+            _outcome(value)[0] not in {"failure", "cancelled"}
+            for value in report.get("preflight", {}).values()
+        )
+        and all(
+            _outcome(scenarios.get(key, {}).get("outcome"))[0] not in {"failure", "cancelled"}
+            for key in ("local", "direct")
+        )
+    )
+
+
+def _environment_note(_report: Mapping[str, Any]) -> str:
+    return (
+        "🔌 **Environment unavailable** — relay infrastructure checks failed. "
+        "The relay flow remains unverified; see the failure diagnosis for the "
+        "affected component and next action."
+    )
+
+
+def _direct_crosscheck(report: Mapping[str, Any]) -> str:
+    outcome = _outcome(report.get("scenarios", {}).get("direct", {}).get("outcome"))[0]
+    if outcome == "success":
+        return "FiberSwap direct passed; relay path not verified"
+    if outcome == "failure":
+        return "FiberSwap direct failed; see direct diagnostic"
+    return "FiberSwap direct did not pass; no direct-path crosscheck is available"
+
+
+def _failed_scenarios(report: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (key, _diagnostic(scenario.get("diagnostic")))
+        for key, _label in SCENARIOS
+        if _outcome((scenario := report.get("scenarios", {}).get(key, {})).get("outcome"))[0]
+        in {"failure", "cancelled"}
+    ]
+
+
+def _compact_diagnosis(report: Mapping[str, Any]) -> str:
+    failed = _failed_scenarios(report)
+    if not failed:
+        return ""
+    crosscheck = _direct_crosscheck(report)
+    # Reserve room for every component, especially the action, before truncating
+    # any individual value. One long evidence item must not hide what to do next.
+    budget = (FIELD_VALUE_LIMIT - _length(crosscheck) - 2 * len(failed)) // len(failed)
+    sections = []
+    for key, diagnostic in failed:
+        location_budget = (int((budget - 4) * 0.18) - _length(f"{key.title()}: ") - 3) // 2
+        location = " / ".join(
+            _truncate(_one_line(diagnostic[field]), location_budget)
+            for field in ("scope", "phase")
+        )
+        values = (
+            (f"{key.title()}: ", location, 0.18),
+            ("", diagnostic["summary"], 0.16),
+            ("Evidence: ", " · ".join(diagnostic["evidence"]), 0.22),
+            ("FiberSwap: ", diagnostic["fiberswap_assessment"], 0.22),
+            ("Next: ", diagnostic["next_action"], 0.22),
+        )
+        sections.append("\n".join(
+            prefix + _truncate(_one_line(value), int((budget - 4) * share) - _length(prefix))
+            for prefix, value, share in values
+        ))
+    return "\n\n".join([*sections, crosscheck])
+
+
+def _github_diagnosis(scenario: Mapping[str, Any], report: Mapping[str, Any]) -> list[str]:
+    diagnostic = _diagnostic(scenario.get("diagnostic"))
+    return [
+        "", "**Failure diagnosis**", "",
+        f"- **Scope / stage:** {_md(diagnostic['scope'])} / {_md(diagnostic['phase'])}",
+        f"- **Summary:** {_md(diagnostic['summary'])}",
+        f"- **FiberSwap assessment:** {_md(diagnostic['fiberswap_assessment'])}",
+        f"- **Next action:** {_md(diagnostic['next_action'])}",
+        f"- **Same-run crosscheck:** {_md(_direct_crosscheck(report))}",
+        "", "**Evidence**", "",
+        *(f"- {_md(evidence)}" for evidence in diagnostic["evidence"]),
+    ]
+
+
 def build_github_summary(report: Mapping[str, Any]) -> str:
     """Render the full CI report independently of Discord and its size limits."""
     _result, emoji, label = _outcome(report.get("job_result"))
+    environment_fault = _is_environment_unavailable(report)
+    if environment_fault:
+        headline = (
+            f"🔌 **Environment unavailable** · "
+            f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed."
+        )
+    else:
+        headline = (
+            f"{emoji} **{label}** · "
+            f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed."
+        )
     lines = [
         "# CCH Daily Smoke · Testnet",
         "",
-        f"{emoji} **{label}** · {_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed."
-        f" · ⏱ {_duration(report.get('total_seconds'))}",
+        f"{headline} · ⏱ {_duration(report.get('total_seconds'))}",
         "",
+    ]
+    if environment_fault:
+        lines.extend([_environment_note(report), ""])
+    lines.extend([
         "## Run overview",
         "",
         "| Item | Value |",
         "| --- | --- |",
-    ]
+    ])
     started = _started_at(report)
     metadata = {
         "Run": f"#{_text(report.get('run_number'))} · attempt {_text(report.get('run_attempt'))}",
@@ -314,6 +448,8 @@ def build_github_summary(report: Mapping[str, Any]) -> str:
         scenario = report.get("scenarios", {}).get(key, {})
         _normalized, icon, status = _outcome(scenario.get("outcome"))
         lines.extend(["", f"### {icon} {scenario_label}", "", f"**{status}**"])
+        if _normalized in {"failure", "cancelled"}:
+            lines.extend(_github_diagnosis(scenario, report))
         data = scenario.get("data")
         if not data:
             lines.extend(["", _missing_summary(
@@ -350,34 +486,58 @@ def build_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     """Render a short notification linking to the detailed CI report."""
     result, emoji, _label = _outcome(report.get("job_result"))
     passed = result == "success"
+    environment_fault = _is_environment_unavailable(report)
     preflight = report.get("preflight", {})
     problems = [
         f"{_outcome(value)[1]} {stage}"
         for stage, value in preflight.items()
         if _outcome(value)[0] != "success"
     ]
-    checks = " · ".join(problems) if problems else (
-        "✅ All checks passed" if preflight else "No check results."
-    )
+    if problems:
+        checks = " · ".join(problems)
+    elif environment_fault:
+        checks = "✅ Checks passed · relay infrastructure unavailable"
+    else:
+        checks = "✅ All checks passed" if preflight else "No check results."
+    if environment_fault and not passed:
+        checks = f"{_environment_note(report)}\n{checks}"
     fields = [
         {"name": "Run overview", "value": _truncate(_run_overview(report), FIELD_VALUE_LIMIT), "inline": False},
         {"name": "Checks", "value": _truncate(checks, FIELD_VALUE_LIMIT), "inline": False},
         {"name": "Scenarios", "value": _truncate("\n".join(_scenario_lines(report)), FIELD_VALUE_LIMIT), "inline": False},
     ]
-    description = f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed"
-    description += "." if passed else "; workflow did not pass."
+    diagnosis = _compact_diagnosis(report)
+    if diagnosis:
+        fields.append({"name": "Failure diagnosis", "value": diagnosis, "inline": False})
+    if passed:
+        description = f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed."
+        color = SUCCESS_COLOR
+    elif environment_fault:
+        description = (
+            f"🔌 Environment unavailable · "
+            f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed; "
+            "relay path not verified."
+        )
+        color = ENVIRONMENT_COLOR
+    else:
+        description = (
+            f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed; "
+            "workflow did not pass."
+        )
+        color = FAILURE_COLOR
     description += f" · ⏱ {_duration(report.get('total_seconds'))}"
+    title_emoji = "🔌" if (environment_fault and not passed) else emoji
     embed = {
-        "title": _truncate(f"{emoji} CCH Daily Smoke · Testnet · #{_one_line(report.get('run_number'), 'unknown')}", 256),
+        "title": _truncate(f"{title_emoji} CCH Daily Smoke · Testnet · #{_one_line(report.get('run_number'), 'unknown')}", 256),
         "description": description,
-        "color": SUCCESS_COLOR if passed else FAILURE_COLOR,
+        "color": color,
         "fields": fields,
         "footer": {"text": "Click the title for the full report and logs"},
     }
     run_url = _text(report.get("run_url"), "")
     if run_url:
         embed["url"] = run_url
-    # Three bounded fields + title/description/footer stay below 6,000 UTF-16 units.
+    # Four bounded fields + title/description/footer stay below 6,000 UTF-16 units.
     return {"allowed_mentions": {"parse": []}, "embeds": [embed]}
 
 

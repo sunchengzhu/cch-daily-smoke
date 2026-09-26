@@ -5,14 +5,16 @@ on:
   schedule:
     - cron: "17 2 * * *" # 10:17 Asia/Shanghai; fallback for the server timer
   workflow_dispatch:
+    # 参数速查（中文，含默认值/取值/坑）：docs/manual-trigger-parameters.md
+    # 每日任务自动发通知；普通手动运行由 send_discord_report 控制通知。
     inputs:
       scheduled_date:
-        description: "Daily scheduler date in Asia/Shanghai (YYYY-MM-DD); leave empty for manual runs"
+        description: "日期（手动测试请留空，不需要填写）：服务器定时任务会自动传入当天日期 YYYY-MM-DD，用于每日去重和发送日报。"
         required: false
         default: ""
         type: string
       fiber_source:
-        description: "Fiber package source"
+        description: "测试哪个 FNN 版本？release＝最新稳定版（默认）；develop＝最新开发版；pr＝指定 Fiber PR 的构建包。"
         required: false
         default: release
         type: choice
@@ -20,13 +22,18 @@ on:
           - release
           - develop
           - pr
+      fiber_allow_prerelease:
+        description: "允许测试 rc 等预发布版：仅对 release 生效。普通测试不勾选；需要验证预发布版时才勾选。"
+        required: false
+        default: false
+        type: boolean
       fiber_pr_number:
-        description: "Fiber PR number; required when source is pr"
+        description: "例如测试 nervosnetwork/fiber 的 PR #1607：上面选 pr，这里填 1607（只填数字，不填 # 或链接）。选 release / develop 时留空；本仓库的 PR 编号不填这里。"
         required: false
         default: ""
         type: string
       send_discord_report:
-        description: "Send the Discord report for this manual preview run"
+        description: "发送本次 Discord 测试通知：勾选＝发送；不勾选＝不发送。GitHub 始终保存完整报告，每日定时任务自动发送通知。"
         required: false
         default: false
         type: boolean
@@ -77,6 +84,9 @@ jobs:
       local_outcome: ${{ steps.local_cch.outcome }}
       direct_outcome: ${{ steps.fiberswap_direct.outcome }}
       relay_outcome: ${{ steps.fiberswap_relay.outcome }}
+      relay_failure_class: ${{ steps.fiberswap_relay.outputs.failure_class }}
+      direct_diagnostic: ${{ steps.fiberswap_direct.outputs.failure_diagnostic }}
+      relay_diagnostic: ${{ steps.fiberswap_relay.outputs.failure_diagnostic }}
       cleanup_outcome: ${{ steps.cleanup_auth.outcome }}
       local_report: ${{ steps.local_cch.outputs.report }}
       direct_report: ${{ steps.fiberswap_direct.outputs.report }}
@@ -85,6 +95,7 @@ jobs:
       CCH_SMOKE_ENABLED: "1"
       CCH_SMOKE_FNN_SOURCE: ${{ inputs.fiber_source || 'release' }}
       CCH_SMOKE_FNN_PR_NUMBER: ${{ inputs.fiber_pr_number || '' }}
+      CCH_SMOKE_FNN_ALLOW_PRERELEASE: ${{ inputs.fiber_allow_prerelease && '1' || '0' }}
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
       CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
       CCH_SMOKE_F2_RPC: http://127.0.0.1:8229
@@ -111,6 +122,14 @@ jobs:
       CCH_FIBER_SWAP_LND_CHANNEL_POINT: 70fdfd0dd7960b1b7ca1f562ae031b3a37925fa957eb97c97536f82ed5f37c35:1
       CCH_FIBER_SWAP_BOTTLE_PUBKEY: 02b6d4e3ab86a2ca2fad6fae0ecb2e1e559e0b911939872a90abdda6d20302be71
       CCH_FIBER_SWAP_FIBER_CHANNEL_ID: "0x4b6513e2d1ad8341366d3b0733f00306aee7e2db21e669a30aba5d33a1ed5536"
+
+      CCH_FIBER_SWAP_RELAY_LND_CONTAINER: lnd-c
+      CCH_FIBER_SWAP_RELAY_NODE_PUBKEY: 03676dd479c6c5422bdcec4691f42f1a6c6b386519b431542e03f31e773d570a41
+      CCH_FIBER_SWAP_RELAY_CHANNEL_POINT: 0cedcc728ba1a51582c6650fc14f1a862912ee4ea400a94049c83326b7e5408e:1
+      # Second hop: Rainbow Dash ↔ FiberSwap. The first hop's SCID is read
+      # separately from lnd-c's channel selected by channel point.
+      CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID: "5637388530143199233"
+      CCH_FIBER_SWAP_RELAY_LND_FEE_LIMIT_SATS: "80"
 
     steps:
       - name: Start report timer
@@ -177,6 +196,11 @@ jobs:
         id: lnd_liquidity
         run: python scripts/ensure_lnd_liquidity.py
 
+      - name: Prepare relay peer connectivity
+        id: relay_connectivity
+        continue-on-error: true
+        run: python scripts/prepare_relay_connectivity.py
+
       - name: Run local CCH smoke
         id: local_cch
         run: |
@@ -193,11 +217,7 @@ jobs:
         id: fiberswap_relay
         env:
           CCH_FIBER_SWAP_RELAY_SMOKE_ENABLED: "1"
-          CCH_FIBER_SWAP_RELAY_LND_CONTAINER: lnd-c
-          CCH_FIBER_SWAP_RELAY_NODE_PUBKEY: 03676dd479c6c5422bdcec4691f42f1a6c6b386519b431542e03f31e773d570a41
-          CCH_FIBER_SWAP_RELAY_CHANNEL_POINT: 0cedcc728ba1a51582c6650fc14f1a862912ee4ea400a94049c83326b7e5408e:1
-          CCH_FIBER_SWAP_RELAY_TO_FIBER_SWAP_SCID: "5637388530143199233"
-          CCH_FIBER_SWAP_RELAY_LND_FEE_LIMIT_SATS: "80"
+          CCH_FIBER_SWAP_RELAY_RECOVERY_PREPARED: "1"
         run: |
           python -m pytest -q -s --no-header \
             tests/test_fiber_swap_relay_daily_smoke.py::test_fiber_swap_via_relay_lnd_bidirectional
@@ -248,6 +268,9 @@ jobs:
       CCH_REPORT_LOCAL_OUTCOME: ${{ needs.cch-daily-smoke.outputs.local_outcome }}
       CCH_REPORT_DIRECT_OUTCOME: ${{ needs.cch-daily-smoke.outputs.direct_outcome }}
       CCH_REPORT_RELAY_OUTCOME: ${{ needs.cch-daily-smoke.outputs.relay_outcome }}
+      CCH_REPORT_FAILURE_CLASS: ${{ needs.cch-daily-smoke.outputs.relay_failure_class }}
+      CCH_REPORT_DIRECT_DIAGNOSTIC: ${{ needs.cch-daily-smoke.outputs.direct_diagnostic }}
+      CCH_REPORT_RELAY_DIAGNOSTIC: ${{ needs.cch-daily-smoke.outputs.relay_diagnostic }}
       CCH_REPORT_CLEANUP_OUTCOME: ${{ needs.cch-daily-smoke.outputs.cleanup_outcome }}
       CCH_REPORT_LOCAL_JSON: ${{ needs.cch-daily-smoke.outputs.local_report }}
       CCH_REPORT_DIRECT_JSON: ${{ needs.cch-daily-smoke.outputs.direct_report }}
@@ -266,7 +289,7 @@ jobs:
         run: python3 scripts/send_daily_smoke_report.py --summary-only
 
       - name: Send compact Discord report
-        if: ${{ always() && (github.event_name == 'schedule' || inputs.send_discord_report) }}
+        if: ${{ always() && (github.event_name == 'schedule' || inputs.scheduled_date != '' || inputs.send_discord_report) }}
         continue-on-error: true
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
