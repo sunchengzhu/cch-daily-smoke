@@ -281,6 +281,23 @@ def test_failure_and_skipped_steps_are_clear_without_summaries():
     assert "earlier step" in summary
 
 
+@pytest.mark.parametrize("failed_scenario", ("LOCAL", "DIRECT", "RELAY"))
+def test_one_failed_smoke_still_reports_the_other_completed_scenarios(failed_scenario):
+    env = complete_env()
+    env["CCH_REPORT_JOB_RESULT"] = "failure"
+    env[f"CCH_REPORT_{failed_scenario}_OUTCOME"] = "failure"
+    env[f"CCH_REPORT_{failed_scenario}_JSON"] = ""
+
+    payload = report.payload_from_env(env)
+    lines = fields_by_name(payload)["Scenarios"].splitlines()
+
+    assert payload["embeds"][0]["color"] == report.FAILURE_COLOR
+    assert "2/3 smoke scenarios passed" in payload["embeds"][0]["description"]
+    assert sum("❌" in line and "Failed" in line for line in lines) == 1
+    assert sum("✅" in line and "Passed" in line for line in lines) == 2
+    assert all("Skipped" not in line for line in lines)
+
+
 def test_cancelled_run_does_not_claim_skipped_scenarios_passed():
     env = complete_env()
     env.update({

@@ -51,18 +51,35 @@ def test_discord_report_receives_all_smoke_results_and_summaries():
     assert "sarisia/actions-status-discord" not in workflow
 
 
-def test_fiberswap_smokes_run_in_order_after_earlier_scenario_failure():
+def test_smoke_scenarios_finish_before_the_job_is_failed():
     workflow = workflow_text()
     job = workflow.split("  cch-daily-smoke:\n", 1)[1].split("\n  report:\n", 1)[0]
 
-    assert job.index("id: local_cch") < job.index("id: fiberswap_direct") < job.index("id: fiberswap_relay")
+    assert (
+        job.index("id: local_cch")
+        < job.index("id: fiberswap_direct")
+        < job.index("id: fiberswap_relay")
+        < job.index("id: cleanup_auth")
+        < job.index("id: report_metadata")
+        < job.index("name: Evaluate smoke outcomes")
+    )
     for name in (
+        "Run local CCH smoke",
         "Run FiberSwap CCH smoke (direct Lightning channel)",
         "Run FiberSwap CCH smoke (via relay LND)",
     ):
         step = job.split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
-        assert "if: ${{ !cancelled() && steps.lnd_liquidity.outcome == 'success' }}" in step
-        assert "continue-on-error:" not in step
+        assert "continue-on-error: true" in step
+        if name != "Run local CCH smoke":
+            assert "if: ${{ !cancelled() && steps.lnd_liquidity.outcome == 'success' }}" in step
+
+    final_step = job.split("      - name: Evaluate smoke outcomes\n", 1)[1]
+    assert "if: ${{ !cancelled() && steps.lnd_liquidity.outcome == 'success' }}" in final_step
+    for scenario in ("local_cch", "fiberswap_direct", "fiberswap_relay"):
+        assert f"steps.{scenario}.outcome" in final_step
+    assert '!= "success"' in final_step
+    assert "exit 1" in final_step
+    assert "continue-on-error:" not in final_step
 
 
 def test_ci_summary_is_independent_of_discord_and_written_before_notification():
