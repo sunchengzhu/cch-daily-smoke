@@ -35,8 +35,8 @@ FAILURE_CLASS_ENV = "CCH_REPORT_FAILURE_CLASS"
 
 SCENARIOS = (
     ("local", "Local CCH"),
-    ("direct", "FiberSwap · direct LND"),
     ("relay", "FiberSwap · via relay LND"),
+    ("direct", "FiberSwap · direct LND"),
 )
 
 OUTCOME_PRESENTATION = {

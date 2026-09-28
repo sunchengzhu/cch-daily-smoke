@@ -4,10 +4,11 @@
 会运行三组互不替代的 live test：
 
 - 原有本地 CCH：`fiber1/CCH + lnd-a + lnd-b`。
-- FiberSwap 直连：`fiber2 + Bottle (Fiber trampoline) + FiberSwap FNN
-  (CCH node) + FiberSwap CCH LND + lnd-d`。
-- FiberSwap 经中继 LND：Fiber 侧相同，Lightning 侧使用
+- FiberSwap 经中继 LND：Fiber 侧为 `fiber2 + Bottle (Fiber trampoline) +
+  FiberSwap FNN (CCH node)`，Lightning 侧使用
   `lnd-c ↔ relay LND ↔ FiberSwap CCH LND`。
+- FiberSwap 直连：使用相同的 Fiber 侧，Lightning 侧为
+  `lnd-d ↔ FiberSwap CCH LND`。
 
 > 本 Demo 按 `1 sat BTC = 1 raw cWBTC` 计价（即 `1 BTC = 1 cWBTC`）。
 
@@ -82,7 +83,7 @@ CCH action      : CCH 通过 FNN 收到 cWBTC 后，通知它的 LND 支付 BTC
 BTC / Lightning : FiberSwap CCH LND → lnd-d
 ```
 
-workflow 还会运行一组独立的 relay-LND 变体。CCH/Fiber 侧逻辑保持不变，
+workflow 会先运行 relay-LND 变体，再运行上述直连场景。CCH/Fiber 侧逻辑保持不变，
 Lightning 资金路径改为：
 
 ```text
@@ -103,7 +104,8 @@ relay 使用公共节点 Rainbow Dash。`lnd-c` 曾通过出站连接建立第�
 
 CI 在三个支付场景之前独立执行 `Prepare relay peer connectivity`：先尝试恢复连接，
 再用 20 秒等待原通道 active 且没有 pending HTLC。结果写入该步骤日志和 GitHub Summary。
-该准备步骤失败不会阻止 direct；direct 创建订单失败也不会再挡住连接恢复。
+该准备步骤失败不会阻止 relay 或 direct；direct 的通道预检失败不会跳过已先运行的
+relay 场景。relay 失败时，后续 direct 仍按 GitHub Actions 默认行为跳过。
 连接 ready 不代表 relay 支付通过，后续 relay 场景仍执行完整检查；CI 不重复拨号。
 
 第一跳原通道 inactive 且 relay peer 不在线时，预检会读取 `lnd-c` 和 `lnd-d`

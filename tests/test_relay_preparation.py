@@ -11,7 +11,12 @@ def test_preparation_precedes_all_payments_and_does_not_block_direct():
     preparation_step = workflow.split('      - name: Prepare relay peer connectivity', 1)[1].split('      - name:', 1)[0]
     assert 'continue-on-error: true' in preparation_step
     assert 'python scripts/prepare_relay_connectivity.py' in preparation_step
-    assert workflow.index('id: relay_connectivity') < workflow.index('id: local_cch') < workflow.index('id: fiberswap_direct')
+    assert (
+        workflow.index('id: relay_connectivity')
+        < workflow.index('id: local_cch')
+        < workflow.index('id: fiberswap_relay')
+        < workflow.index('id: fiberswap_direct')
+    )
     relay_step = workflow.split('      - name: Run FiberSwap CCH smoke (via relay LND)', 1)[1].split('      - name:', 1)[0]
     assert 'CCH_FIBER_SWAP_RELAY_RECOVERY_PREPARED: "1"' in relay_step
     job_env = workflow.split('  cch-daily-smoke:', 1)[1].split('    steps:', 1)[0]

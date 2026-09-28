@@ -273,9 +273,9 @@ def test_failure_and_skipped_steps_are_clear_without_summaries():
     assert embed["title"].startswith("❌")
     assert "did not pass" in embed["description"]
     assert "1/3 smoke scenarios passed" in embed["description"]
-    direct, relay = fields["Scenarios"].splitlines()[1:]
-    assert "❌" in direct and "Failed" in direct
+    relay, direct = fields["Scenarios"].splitlines()[1:]
     assert "⏭️" in relay and "Skipped" in relay
+    assert "❌" in direct and "Failed" in direct
     summary = github_summary(env)
     assert "open the run log" in summary
     assert "earlier step" in summary

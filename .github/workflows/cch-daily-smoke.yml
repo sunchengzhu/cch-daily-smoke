@@ -207,12 +207,6 @@ jobs:
           python -m pytest -q -s --no-header \
             tests/test_cch_daily_smoke.py::test_cch_daily_smoke_bidirectional
 
-      - name: Run FiberSwap CCH smoke (direct Lightning channel)
-        id: fiberswap_direct
-        run: |
-          python -m pytest -q -s --no-header \
-            tests/test_fiber_swap_daily_smoke.py::test_fiber_swap_bidirectional
-
       - name: Run FiberSwap CCH smoke (via relay LND)
         id: fiberswap_relay
         env:
@@ -221,6 +215,12 @@ jobs:
         run: |
           python -m pytest -q -s --no-header \
             tests/test_fiber_swap_relay_daily_smoke.py::test_fiber_swap_via_relay_lnd_bidirectional
+
+      - name: Run FiberSwap CCH smoke (direct Lightning channel)
+        id: fiberswap_direct
+        run: |
+          python -m pytest -q -s --no-header \
+            tests/test_fiber_swap_daily_smoke.py::test_fiber_swap_bidirectional
 
       - name: Remove FNN auth file
         id: cleanup_auth
