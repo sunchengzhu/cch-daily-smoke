@@ -51,6 +51,20 @@ def test_discord_report_receives_all_smoke_results_and_summaries():
     assert "sarisia/actions-status-discord" not in workflow
 
 
+def test_fiberswap_smokes_run_in_order_after_earlier_scenario_failure():
+    workflow = workflow_text()
+    job = workflow.split("  cch-daily-smoke:\n", 1)[1].split("\n  report:\n", 1)[0]
+
+    assert job.index("id: local_cch") < job.index("id: fiberswap_direct") < job.index("id: fiberswap_relay")
+    for name in (
+        "Run FiberSwap CCH smoke (direct Lightning channel)",
+        "Run FiberSwap CCH smoke (via relay LND)",
+    ):
+        step = job.split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
+        assert "if: ${{ !cancelled() && steps.lnd_liquidity.outcome == 'success' }}" in step
+        assert "continue-on-error:" not in step
+
+
 def test_ci_summary_is_independent_of_discord_and_written_before_notification():
     report_job = workflow_text().split("  report:\n", 1)[1]
     job_config, steps = report_job.split("    steps:\n", 1)

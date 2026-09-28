@@ -209,12 +209,14 @@ jobs:
 
       - name: Run FiberSwap CCH smoke (direct Lightning channel)
         id: fiberswap_direct
+        if: ${{ !cancelled() && steps.lnd_liquidity.outcome == 'success' }}
         run: |
           python -m pytest -q -s --no-header \
             tests/test_fiber_swap_daily_smoke.py::test_fiber_swap_bidirectional
 
       - name: Run FiberSwap CCH smoke (via relay LND)
         id: fiberswap_relay
+        if: ${{ !cancelled() && steps.lnd_liquidity.outcome == 'success' }}
         env:
           CCH_FIBER_SWAP_RELAY_SMOKE_ENABLED: "1"
           CCH_FIBER_SWAP_RELAY_RECOVERY_PREPARED: "1"
