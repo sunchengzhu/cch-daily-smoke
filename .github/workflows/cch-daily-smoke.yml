@@ -203,18 +203,23 @@ jobs:
 
       - name: Run local CCH smoke
         id: local_cch
+        continue-on-error: true
         run: |
           python -m pytest -q -s --no-header \
             tests/test_cch_daily_smoke.py::test_cch_daily_smoke_bidirectional
 
       - name: Run FiberSwap CCH smoke (direct Lightning channel)
         id: fiberswap_direct
+        if: ${{ !cancelled() && steps.lnd_liquidity.outcome == 'success' }}
+        continue-on-error: true
         run: |
           python -m pytest -q -s --no-header \
             tests/test_fiber_swap_daily_smoke.py::test_fiber_swap_bidirectional
 
       - name: Run FiberSwap CCH smoke (via relay LND)
         id: fiberswap_relay
+        if: ${{ !cancelled() && steps.lnd_liquidity.outcome == 'success' }}
+        continue-on-error: true
         env:
           CCH_FIBER_SWAP_RELAY_SMOKE_ENABLED: "1"
           CCH_FIBER_SWAP_RELAY_RECOVERY_PREPARED: "1"
@@ -238,6 +243,19 @@ jobs:
         run: |
           if [[ "$STARTED_AT" =~ ^[0-9]+$ ]]; then
             echo "duration_seconds=$(( $(date +%s) - STARTED_AT ))" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Evaluate smoke outcomes
+        if: ${{ !cancelled() && steps.lnd_liquidity.outcome == 'success' }}
+        env:
+          LOCAL_OUTCOME: ${{ steps.local_cch.outcome }}
+          DIRECT_OUTCOME: ${{ steps.fiberswap_direct.outcome }}
+          RELAY_OUTCOME: ${{ steps.fiberswap_relay.outcome }}
+        run: |
+          echo "Smoke outcomes: local=$LOCAL_OUTCOME, direct=$DIRECT_OUTCOME, relay=$RELAY_OUTCOME"
+          if [[ "$LOCAL_OUTCOME" != "success" || "$DIRECT_OUTCOME" != "success" || "$RELAY_OUTCOME" != "success" ]]; then
+            echo "::error::At least one smoke scenario failed or did not run."
+            exit 1
           fi
 
   report:

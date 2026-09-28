@@ -103,7 +103,9 @@ relay 使用公共节点 Rainbow Dash。`lnd-c` 曾通过出站连接建立第�
 
 CI 在三个支付场景之前独立执行 `Prepare relay peer connectivity`：先尝试恢复连接，
 再用 20 秒等待原通道 active 且没有 pending HTLC。结果写入该步骤日志和 GitHub Summary。
-该准备步骤失败不会阻止 direct；direct 创建订单失败也不会再挡住连接恢复。
+该准备步骤失败不会跳过后面的支付场景。只要共同的环境准备通过，三组 smoke
+会顺序跑完，即使前一组失败也继续后面的测试；最后统一检查结果，任一组失败或
+未运行都会将 CI 标红。
 连接 ready 不代表 relay 支付通过，后续 relay 场景仍执行完整检查；CI 不重复拨号。
 
 第一跳原通道 inactive 且 relay peer 不在线时，预检会读取 `lnd-c` 和 `lnd-d`
