@@ -32,9 +32,9 @@ BINARIES_REPLACED=0
 CLI_REPLACED=0
 
 # A prerelease may ship without the database migration needed to upgrade the
-# existing node stores (v0.10.0-rc1 did exactly that, and its release notes
-# told operators not to upgrade). The daily job must therefore track published
-# stable releases by default; opting in has to be explicit.
+# existing node stores (v0.10.0-rc1 did exactly that). Unpinned release
+# selection excludes prereleases by default; the daily workflow explicitly
+# pins the rc3 build that was validated against these stores.
 ALLOW_PRERELEASE="${CCH_SMOKE_FNN_ALLOW_PRERELEASE:-0}"
 case "$ALLOW_PRERELEASE" in
   0 | 1) ;;
