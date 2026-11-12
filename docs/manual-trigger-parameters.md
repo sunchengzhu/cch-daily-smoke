@@ -49,7 +49,7 @@
 | `CCH_SMOKE_FNN_REPOSITORY` | `nervosnetwork/fiber` | 换仓库时用，基本不动。 |
 | `CCH_SMOKE_FNN_CONF_URL` | `https://github-test-logs.ckbapp.dev/fiber/fnn.conf` | `develop` / `pr` 包的清单地址，换内测源时才有用。 |
 | `CCH_SMOKE_NODE1_DIR` / `CCH_SMOKE_NODE2_DIR` | `/home/ckb/fiber-test/testnet/node1`、`…/node2` | 两个节点目录。换机器才需要改。 |
-| `CCH_SMOKE_FNN_BACKUP_ROOT` | `/home/ckb/fiber-test/testnet/.binary-backups` | 升级前旧二进制与完整节点目录的备份位置。节点数据快照保存在私有子目录中，只供人工恢复。 |
+| `CCH_SMOKE_FNN_BACKUP_ROOT` | `/home/ckb/fiber-test/testnet/.binary-backups` | 升级前旧二进制与节点数据快照的备份位置。快照保存配置、密钥和当前数据库，排除已有的历史数据库备份；私有子目录只供人工恢复。 |
 | `CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT` | `600` | 停服后复制两个节点目录的最长秒数。超时则恢复旧服务，不替换二进制。 |
 | `CCH_SMOKE_FNN_AUTH_TOKEN` | 空 | Fiber RPC 的 biscuit token（真实值），脚本会把它落到私有临时文件。 |
 | `CCH_SMOKE_FNN_AUTH_TOKEN_FILE` | 空 | 上面 token 的文件形式，优先级高于直接给 token。CI 里用 secret 写成文件后传这个。 |

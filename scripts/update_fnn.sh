@@ -446,14 +446,16 @@ if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
   log "both node stores validated in ${VALIDATION_ELAPSED}s"
 
   BACKUP_DIR="$BACKUP_ROOT/$(date -u '+%Y%m%dT%H%M%SZ')-$BACKUP_TAG"
-  # Back up the full node directories while both services are stopped. The
-  # release may update persisted state on startup; restoring only an older
-  # binary would then be insufficient. Keep this snapshot for manual recovery,
-  # never automatically restore channel state after a node has restarted.
+  # Capture the current node state while both services are stopped. Historical
+  # RocksDB checkpoints are excluded because they already have their own
+  # backup copies and would multiply the size of this pre-upgrade snapshot.
+  # Never automatically restore channel state after a node has restarted.
   sudo -n install -d -m 0700 "$BACKUP_DIR/node-data"
-  log "backing up both stopped node directories ($SOURCE_BYTES bytes) to $BACKUP_DIR/node-data"
+  log "backing up both stopped node directories to $BACKUP_DIR/node-data"
   sudo -n timeout --signal=TERM --kill-after=10s "$DATA_BACKUP_TIMEOUT" \
-    cp -a "$NODE1_DIR" "$NODE2_DIR" "$BACKUP_DIR/node-data/"
+    tar -C "$NODE1_DIR" --exclude='./fiber/backups' -cf "$BACKUP_DIR/node-data/node1.tar" .
+  sudo -n timeout --signal=TERM --kill-after=10s "$DATA_BACKUP_TIMEOUT" \
+    tar -C "$NODE2_DIR" --exclude='./fiber/backups' -cf "$BACKUP_DIR/node-data/node2.tar" .
   sudo -n touch "$BACKUP_DIR/node-data/COMPLETE"
   log "full node data backup completed"
 
