@@ -85,7 +85,7 @@ jobs:
           gh workflow run cch-daily-smoke.yml \
             --repo sunchengzhu/cch-daily-smoke --ref main \
             --raw-field scheduled_date="$(TZ=Asia/Shanghai date +%F)" \
-            --raw-field fiber_source=release --raw-field send_discord_report=true
+            --raw-field send_discord_report=true
 
       - name: Pause the server timer
         if: ${{ inputs.operation == 'pause' }}

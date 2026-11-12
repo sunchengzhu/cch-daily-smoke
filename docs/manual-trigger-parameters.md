@@ -1,64 +1,41 @@
 # 手动参数速查（中文备注）
 
-在 Actions 选择 **cch daily smoke**（`cch-daily-smoke.yml`）。手动触发页面上能看到的参数只有 5 个，其余都是脚本内部的环境变量。本文把
-「界面上选什么」「环境变量填什么」「默认值是多少」「什么时候需要动」写在一处，
-避免记不住。
+在 Actions 选择 **cch daily smoke**（`cch-daily-smoke.yml`）。手动触发只有日期和
+通知两个参数。日常任务只校验已安装的 FNN，不会升级节点。
 
-> 普通手动测试：日期留空，版本选 `release`，其余保持默认即可。
-> 需要测试 Discord 通知时勾选通知选项；不勾选则只看 GitHub Summary。每日定时任务自动发送。
-> 页面已写明各项用途，下文提供更详细的参数说明。
-
----
-
-## 1. 手动触发时你能选的 5 个参数
-
-普通手动运行主要使用 `fiber_source`；需要同时测试通知时，勾选 `send_discord_report`。
-其余三个基本不用碰。
+## 1. 手动触发参数
 
 | 参数 | 默认值 | 中文备注 |
 | --- | --- | --- |
-| `scheduled_date` | 空 | **排期日期，手动跑一律留空。** 只给服务器定时器用（东八区 `YYYY-MM-DD`），作用是当天去重 + 在报告里显示「计划 10:00 / 实际开始 +延迟」的对照。填了会被当成定时任务。留空则报告显示 Manual run。 |
-| `fiber_source` | `release` | **被测 FNN 包从哪来。** `release`＝当前固定的 `v0.10.0-rc3`（日常就用这个）；`develop`＝内测 develop 包（未发布代码，会变）；`pr`＝某个 PR 的构建包（要同时填 `fiber_pr_number`）。 |
-| `fiber_allow_prerelease` | `false` | **是否改测最新发布版（包括 rc）。** `false`＝使用固定的 rc3；`true`＝自动选择最新发布版。新 rc 仍可能改变数据库格式，切换前需确认迁移与备份。 |
-| `fiber_pr_number` | 空 | **只有版本来源选 `pr` 时填写。** 例如测试 `nervosnetwork/fiber#1607`，只填 `1607`，不填 `#` 或完整链接；选 `release` / `develop` 时留空。本仓库的 PR 编号不填这里。脚本会校验构建包属于指定 Fiber PR。 |
-| `send_discord_report` | `false` | 勾选后本次手动运行也发送 Discord 测试通知；不勾选则只保留 GitHub Summary。GitHub `schedule` 或携带 `scheduled_date` 的每日任务自动发送，不受此选项影响。 |
+| `scheduled_date` | 空 | 手动运行留空；仅服务器定时任务传入当天日期，用于去重和日报。 |
+| `send_discord_report` | `false` | 手动运行需要通知时勾选；每日定时任务始终发送。 |
 
-例如测试本仓库的 PR #12，只需在 **Use workflow from** 选它的分支；FNN 版本来源可保持 `release`，日期和 Fiber PR 编号留空。
-
-### `fiber_source` 三个取值怎么选
-
-| 想干什么 | 怎么选 |
-| --- | --- |
-| 日常回归 / 上线前确认 | `release`（默认，什么都不用改） |
-| 提前验证最新 rc 的改动 | `release` + `fiber_allow_prerelease=true` |
-| 验证某个 PR 的修复 | `pr` + 填 `fiber_pr_number` |
-| 跟最新开发进展 | `develop`（包里没有 `fnn-cli`，脚本会保留 node1 已装的 CLI） |
+测试本仓库 PR 时，在 **Use workflow from** 选择对应分支；节点仍须运行该分支预期的 FNN 版本。
 
 ---
 
-## 2. FNN 自动更新（`scripts/update_fnn.sh`）
+## 2. FNN 校验与人工升级
 
-日常定时任务会先跑这个脚本，把节点二进制升级到目标版本，再跑 smoke。
+日常任务运行 `scripts/verify_fnn.sh`，只读取两台节点的二进制版本并检查两个 RPC。
+预期版本写在工作流的 `CCH_SMOKE_FNN_EXPECTED_TAG` 和
+`CCH_SMOKE_FNN_EXPECTED_COMMIT`。版本不符时停止 smoke，节点保持原状。
 
-| 环境变量 | 默认值 | 中文备注 |
+需要升级时，由人或 Codex 确定目标版本、检查迁移与备份，再单独运行
+`scripts/update_fnn.sh`。release 升级必须显式设置 `CCH_SMOKE_FNN_RELEASE_TAG`；
+脚本不会自行挑选最新发布包。升级完成并确认两个 RPC 后，再修改工作流中的预期版本。
+
+| 人工升级变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `CCH_SMOKE_FNN_SOURCE` | `release` | 对应界面上的 `fiber_source`。 |
-| `CCH_SMOKE_FNN_ALLOW_PRERELEASE` | `0` | 对应界面上的 `fiber_allow_prerelease`，只接受 `0` / `1`，其它值直接报错退出。 |
-| `CCH_SMOKE_FNN_PR_NUMBER` | 空 | 对应界面上的 `fiber_pr_number`，只能与 `source=pr` 搭配。 |
-| `CCH_SMOKE_FNN_RELEASE_TAG` | 脚本为空；CI 默认 `v0.10.0-rc3` | **钉死某个 release 标签。** CI 的日常任务和普通手动任务固定使用 rc3，避免将已迁移的数据库降级到 v0.9.1。选 `develop` / `pr` 或勾选 `fiber_allow_prerelease` 时，CI 清空此值。 |
-| `CCH_SMOKE_FNN_REPOSITORY` | `nervosnetwork/fiber` | 换仓库时用，基本不动。 |
-| `CCH_SMOKE_FNN_CONF_URL` | `https://github-test-logs.ckbapp.dev/fiber/fnn.conf` | `develop` / `pr` 包的清单地址，换内测源时才有用。 |
-| `CCH_SMOKE_NODE1_DIR` / `CCH_SMOKE_NODE2_DIR` | `/home/ckb/fiber-test/testnet/node1`、`…/node2` | 两个节点目录。换机器才需要改。 |
-| `CCH_SMOKE_FNN_BACKUP_ROOT` | `/home/ckb/fiber-test/testnet/.binary-backups` | 升级前旧二进制与节点数据快照的备份位置。快照保存配置、密钥和当前数据库，排除已有的历史数据库备份；私有子目录只供人工恢复。 |
-| `CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT` | `600` | 停服后复制两个节点目录的最长秒数。超时则恢复旧服务，不替换二进制。 |
-| `CCH_SMOKE_FNN_AUTH_TOKEN` | 空 | Fiber RPC 的 biscuit token（真实值），脚本会把它落到私有临时文件。 |
-| `CCH_SMOKE_FNN_AUTH_TOKEN_FILE` | 空 | 上面 token 的文件形式，优先级高于直接给 token。CI 里用 secret 写成文件后传这个。 |
-| `CCH_SMOKE_FNN_VALIDATION_TIMEOUT` | `300` | 新二进制 `--check-validate` 扫库的超时秒数。超时会明确报 `timed out`，并按失败处理（回滚 + 恢复服务）。设这个是为了避免卡死时耗到 workflow 30 分钟上限——那样 step 被强杀，清理逻辑来不及跑，两个 Fiber 服务会停在关闭状态。 |
+| `CCH_SMOKE_FNN_SOURCE` | `release` | 目标来源，可选 `release`、`develop`、`pr`。 |
+| `CCH_SMOKE_FNN_RELEASE_TAG` | 无 | `release` 必填，指定准确标签，包括 RC。 |
+| `CCH_SMOKE_FNN_PR_NUMBER` | 空 | 仅升级 Fiber PR 包时填写编号。 |
+| `CCH_SMOKE_FNN_AUTH_TOKEN_FILE` | 空 | 两个 RPC 的认证文件；每日校验也使用它。 |
+| `CCH_SMOKE_FNN_BACKUP_ROOT` | `/home/ckb/fiber-test/testnet/.binary-backups` | 停服数据快照和旧二进制的存放位置。 |
+| `CCH_SMOKE_FNN_VALIDATION_TIMEOUT` | `300` | 停服数据校验的秒数上限；大库升级前需评估并调整。 |
+| `CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT` | `600` | 每个节点停服备份的秒数上限。 |
 
-**升级时会发生什么**：版本没变就不重启；只有 `fnn-cli` 落后就只换 CLI、不扫数据库；
-`fnn` 有新版本才检查磁盘空间 → 停服 → 用新二进制 `--check-validate` 扫两个库 → 备份完整
-节点目录 → 通过才替换。校验或备份失败会**恢复旧服务，不替换二进制**。备份后如新版本
-启动失败，脚本会尝试恢复旧二进制；节点数据快照留给人工评估，不会自动回滚通道状态。
+人工升级仍会检查磁盘、停服务、校验数据、备份，再替换二进制并检查健康；
+校验或备份失败会恢复旧服务。节点数据快照留给人工评估，不会自动回滚通道状态。
 
 ---
 
@@ -157,8 +134,7 @@
 | --- | --- | --- |
 | `CCH_SMOKE_DISPATCH_TOKEN_FILE` | — | 服务器上存放 GitHub token 的文件（权限必须是 `0600`）。由 systemd unit 指定，日常不动。 |
 
-派发时会显式带上 `fiber_source=release` + `send_discord_report=true` + 当天日期，
-所以**定时任务只跟稳定版、并且一定会发 Discord**。
+派发时带上 `send_discord_report=true` 和当天日期；定时任务不会指定或升级 FNN 版本。
 
 ---
 
@@ -174,7 +150,6 @@ GitHub 摘要和 Discord 消息。**不需要也不应该手工设置**，这里
 ## 9. 一句话记忆
 
 - **日常**：什么都不用填，直接 Run workflow。
-- **想测 rc**：`fiber_allow_prerelease` 勾上。
-- **想测 Fiber PR #1607**：`fiber_source=pr` + 编号填 `1607`。
+- **升级 Fiber**：单独发起人工升级，指定版本，验证成功后更新工作流中的预期版本。
 - **通知**：想测试 Discord 就勾选 `send_discord_report`；不勾选则只看 GitHub Summary。
 - **`scheduled_date` 永远留空。**

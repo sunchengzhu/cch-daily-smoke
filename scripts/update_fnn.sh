@@ -31,19 +31,12 @@ SERVICES_STOPPED=0
 BINARIES_REPLACED=0
 CLI_REPLACED=0
 
-# A prerelease may ship without the database migration needed to upgrade the
-# existing node stores (v0.10.0-rc1 did exactly that). Unpinned release
-# selection excludes prereleases by default; the daily workflow explicitly
-# pins the rc3 build that was validated against these stores.
-ALLOW_PRERELEASE="${CCH_SMOKE_FNN_ALLOW_PRERELEASE:-0}"
-case "$ALLOW_PRERELEASE" in
-  0 | 1) ;;
-  *)
-    printf 'CCH_SMOKE_FNN_ALLOW_PRERELEASE must be 0 or 1, got: %s\n' \
-      "$ALLOW_PRERELEASE" >&2
-    exit 1
-    ;;
-esac
+# This script is for an operator-initiated upgrade. Never infer a target from
+# the newest release: each new build needs its own compatibility review.
+if [[ "$FNN_SOURCE" == "release" && -z "$RELEASE_TAG" ]]; then
+  printf 'Manual release upgrade requires CCH_SMOKE_FNN_RELEASE_TAG\n' >&2
+  exit 1
+fi
 
 [[ "$DATA_BACKUP_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || {
   printf 'CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT must be a positive number of seconds\n' >&2
@@ -206,38 +199,16 @@ case "$(uname -m)" in
 esac
 
 case "$FNN_SOURCE" in
-  latest | release)
-    FNN_SOURCE="release"
+  release)
     [[ -z "$FNN_PR_NUMBER" ]] || {
       printf 'CCH_SMOKE_FNN_PR_NUMBER can only be used with source=pr\n' >&2
       exit 1
     }
-    if [[ -n "$RELEASE_TAG" ]]; then
-      log "resolving requested release $RELEASE_TAG"
-      RELEASE_JSON="$(
-        curl -fsSL --retry 3 \
-          "https://api.github.com/repos/$REPOSITORY/releases/tags/$RELEASE_TAG"
-      )"
-    else
-      if [[ "$ALLOW_PRERELEASE" == "1" ]]; then
-        log "resolving latest published release, including prereleases"
-      else
-        log "resolving latest published stable release, excluding prereleases"
-      fi
-      # The unfiltered newest release may be a prerelease without a database
-      # migration path, so prereleases are excluded unless explicitly allowed.
-      RELEASE_JSON="$(
-        curl -fsSL --retry 3 \
-          "https://api.github.com/repos/$REPOSITORY/releases?per_page=30" \
-          | jq -c --argjson allow_prerelease "$ALLOW_PRERELEASE" \
-            '[.[] | select(.draft | not) | select($allow_prerelease == 1 or (.prerelease | not))] | sort_by(.published_at) | last'
-      )"
-      if [[ -z "$RELEASE_JSON" || "$RELEASE_JSON" == "null" ]]; then
-        printf 'no published stable release found for %s; set CCH_SMOKE_FNN_ALLOW_PRERELEASE=1 to allow prereleases\n' \
-          "$REPOSITORY" >&2
-        exit 1
-      fi
-    fi
+    log "resolving requested release $RELEASE_TAG"
+    RELEASE_JSON="$(
+      curl -fsSL --retry 3 \
+        "https://api.github.com/repos/$REPOSITORY/releases/tags/$RELEASE_TAG"
+    )"
 
     TARGET_TAG="$(jq -r '.tag_name // empty' <<<"$RELEASE_JSON")"
     [[ -n "$TARGET_TAG" ]] || {

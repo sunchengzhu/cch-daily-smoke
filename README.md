@@ -263,21 +263,20 @@ workflow 会固定下面这些值，以保证测试命中刚刚验证过的节�
 在 Actions 选择 **cch daily smoke**（`cch-daily-smoke.yml`），再点击 **Run workflow**。
 手动测试和每日自动任务共用这个工作流；日期留空即可手动运行，不占用当天日报名额。
 
-- 普通回归：日期和 PR 编号留空，版本选 `release`；想测试 Discord 时勾选通知。
-- 测试 Fiber PR：例如 `nervosnetwork/fiber#1607`，版本选 `pr`，编号只填 `1607`。
-- 测试本仓库 PR：在 **Use workflow from** 选择对应分支；FNN 仍可选 `release`，不要把本仓库 PR 编号填到 Fiber PR 栏。
+- 普通回归：日期留空；想测试 Discord 时勾选通知。
+- 测试本仓库 PR：在 **Use workflow from** 选择对应分支。
+- 升级 Fiber：单独发起人工升级，完成兼容性检查、备份和节点切换后，再更新工作流中的预期版本。
 
 ```bash
 gh workflow run cch-daily-smoke.yml \
   --repo sunchengzhu/cch-daily-smoke \
   --ref main \
-  -f fiber_source=release \
   -f send_discord_report=false
 ```
 
 > 手动触发页面上每个参数的中文备注、默认值、什么时候该动哪个，见
 > [`docs/manual-trigger-parameters.md`](docs/manual-trigger-parameters.md)。
-> 日常只需要「直接 Run workflow」，想测 rc 就勾 `fiber_allow_prerelease`。
+> 日常任务只检查已安装的 Fiber 版本和健康状态，不会下载、安装或切换 FNN。
 
 ```bash
 cd /Users/sunchengzhu/project/cch-daily-smoke
@@ -413,41 +412,17 @@ read("cch");
 write("cch");
 ```
 
-## FNN 自动更新
+## FNN 版本校验与人工升级
 
-每日 smoke 前会运行 `scripts/update_fnn.sh`：
+每日 smoke 运行 `scripts/verify_fnn.sh`：核对两台节点的已安装版本、commit、
+`fnn-cli` 和 RPC。预期版本写在 `cch-daily-smoke.yml` 的
+`CCH_SMOKE_FNN_EXPECTED_TAG` / `CCH_SMOKE_FNN_EXPECTED_COMMIT`；不匹配时直接报错，
+不会下载发布包、停服务或替换二进制。
 
-- 定时任务和手动任务默认只选择**稳定版**发布包，跳过 prerelease。升级是就地
-  替换节点二进制，而 prerelease 可能尚未提供数据库迁移（例如 `v0.10.0-rc1`
-  的说明写明不支持从旧版本升级），因此不会自动装到跑着的节点上。
-- 需要验证 prerelease 时，手动触发把 `fiber_allow_prerelease` 设为 `true`，
-  脚本才会在展开候选时包含 prerelease；draft 始终排除。
-- 手动触发参数 `fiber_source` 可选择 `release`、`develop` 或 `pr`。`release`
-  表示 GitHub Releases 列表中最新的发布包（默认稳定版）；`develop` 会读取
-  `https://github-test-logs.ckbapp.dev/fiber/fnn.conf` 中的 `TARBALL_develop`。
-  选择 `pr` 时还需填写 `fiber_pr_number`，例如 `1607`，脚本会读取
-  `TARBALL_pr1607` 并校验下载包确实属于该 PR。
-- `develop` 和 `pr` 通道按定义就是未发布代码，不受 prerelease 开关影响。
-- release 包会校验 GitHub 提供的 SHA-256；develop 和 PR 包通过 HTTPS 下载并
-  记录 SHA-256，但上游未提供摘要，因此无法做外部摘要比对。
-- `fnn` 版本无变化时不重启；只有 `fnn-cli` 落后时直接更新 CLI，不扫描数据库。
-- `fnn` 有新版本时先停止 `fiber-testnet1.service` 和 `fiber-testnet2.service`。
-- 使用新 `fnn --check-validate` 并行检查两个节点的数据库，默认 300 秒超时
-  （`CCH_SMOKE_FNN_VALIDATION_TIMEOUT` 可调）。只有确认不需要迁移时，
-  才备份并替换两个节点的 `fnn`，同时更新 node1 的 `fnn-cli`。超时按校验失败
-  处理，避免卡死耗到 workflow 上限后跳过回滚、把两个服务留在停服状态。
-- 当前 develop 和 PR 包不包含 `fnn-cli`，选择这两类包时会保留 node1 已安装的
-  CLI。
-- 启动服务并等待两个 RPC 返回版本、commit 和 pubkey，成功后才运行 smoke。
-- 启动或健康检查失败时恢复旧二进制并重新启动服务。
-
-如果新版本需要数据库迁移，自动更新会在替换前失败并恢复旧服务。数据库迁移必须
-先备份数据，再按照对应版本的 migration guide 手动执行。`v0.9.x` 已内置统一迁移
-系统；只有早于统一迁移 epoch 的数据库才需要使用 `v0.8.x` 的 `fnn-migrate`。
-
-`release` 模式可通过 `CCH_SMOKE_FNN_RELEASE_TAG` 指定发布标签；未指定时自动
-选择最新的稳定版发布。环境变量 `CCH_SMOKE_FNN_ALLOW_PRERELEASE=1` 可放开
-prerelease（等价于手动触发的 `fiber_allow_prerelease`），仅接受 `0` 或 `1`。
+以后需要升级时，由人或 Codex 针对**明确的目标版本**检查数据库迁移与兼容性，
+备份并升级节点，确认两台节点健康后再修改预期版本。`scripts/update_fnn.sh` 只供
+这类人工操作使用；release 升级必须显式提供 `CCH_SMOKE_FNN_RELEASE_TAG`，
+不再自动挑选最新发布包。
 
 ## 验证内容
 
