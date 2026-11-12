@@ -133,6 +133,12 @@ start_services() {
 rollback() {
   set +e
   log "update failed; restoring previous binaries"
+  if [[ "$BINARIES_REPLACED" == "0" && -n "$BACKUP_DIR" \
+    && -d "$BACKUP_DIR/node-data" \
+    && ! -f "$BACKUP_DIR/node-data/COMPLETE" ]]; then
+    log "removing incomplete node data snapshot from $BACKUP_DIR"
+    sudo -n rm -r -- "$BACKUP_DIR/node-data"
+  fi
   if [[ "$SERVICES_STOPPED" == "1" || "$BINARIES_REPLACED" == "1" ]]; then
     sudo -n systemctl stop "$SERVICE1" "$SERVICE2"
   fi
