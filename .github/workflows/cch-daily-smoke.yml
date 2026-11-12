@@ -14,7 +14,7 @@ on:
         default: ""
         type: string
       fiber_source:
-        description: "测试哪个 FNN 版本？release＝最新稳定版（默认）；develop＝最新开发版；pr＝指定 Fiber PR 的构建包。"
+        description: "测试哪个 FNN 版本？release＝固定 v0.10.0-rc3（默认）；develop＝最新开发版；pr＝指定 Fiber PR 的构建包。"
         required: false
         default: release
         type: choice
@@ -23,7 +23,7 @@ on:
           - develop
           - pr
       fiber_allow_prerelease:
-        description: "允许测试 rc 等预发布版：仅对 release 生效。普通测试不勾选；需要验证预发布版时才勾选。"
+        description: "仅对 release 生效：勾选后改测最新发布版（包括 rc）；不勾选则使用固定的 v0.10.0-rc3。"
         required: false
         default: false
         type: boolean
@@ -96,6 +96,9 @@ jobs:
       CCH_SMOKE_FNN_SOURCE: ${{ inputs.fiber_source || 'release' }}
       CCH_SMOKE_FNN_PR_NUMBER: ${{ inputs.fiber_pr_number || '' }}
       CCH_SMOKE_FNN_ALLOW_PRERELEASE: ${{ inputs.fiber_allow_prerelease && '1' || '0' }}
+      # The two persisted stores have already migrated past v0.9.1. Pin the
+      # tested rc3 target until a compatible stable release is published.
+      CCH_SMOKE_FNN_RELEASE_TAG: ${{ (inputs.fiber_source == 'develop' || inputs.fiber_source == 'pr' || inputs.fiber_allow_prerelease) && '' || 'v0.10.0-rc3' }}
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
       CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
       CCH_SMOKE_F2_RPC: http://127.0.0.1:8229
