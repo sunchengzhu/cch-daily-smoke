@@ -25,12 +25,6 @@ DATA_BACKUP_TIMEOUT="${CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT:-600}"
 # it well below the workflow timeout so the rollback below always runs.
 VALIDATION_TIMEOUT="${CCH_SMOKE_FNN_VALIDATION_TIMEOUT:-300}"
 
-TMP_DIR="$(mktemp -d)"
-BACKUP_DIR=""
-SERVICES_STOPPED=0
-BINARIES_REPLACED=0
-CLI_REPLACED=0
-
 # This script is for an operator-initiated upgrade. Never infer a target from
 # the newest release: each new build needs its own compatibility review.
 if [[ "$FNN_SOURCE" == "release" && -z "$RELEASE_TAG" ]]; then
@@ -42,6 +36,12 @@ fi
   printf 'CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT must be a positive number of seconds\n' >&2
   exit 1
 }
+
+TMP_DIR="$(mktemp -d)"
+BACKUP_DIR=""
+SERVICES_STOPPED=0
+BINARIES_REPLACED=0
+CLI_REPLACED=0
 
 log() {
   printf '[fnn-update] %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
