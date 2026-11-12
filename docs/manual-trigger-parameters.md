@@ -18,8 +18,8 @@
 | 参数 | 默认值 | 中文备注 |
 | --- | --- | --- |
 | `scheduled_date` | 空 | **排期日期，手动跑一律留空。** 只给服务器定时器用（东八区 `YYYY-MM-DD`），作用是当天去重 + 在报告里显示「计划 10:00 / 实际开始 +延迟」的对照。填了会被当成定时任务。留空则报告显示 Manual run。 |
-| `fiber_source` | `release` | **被测 FNN 包从哪来。** `release`＝GitHub Releases 里的最新**稳定版**（日常就用这个）；`develop`＝内测 develop 包（未发布代码，会变）；`pr`＝某个 PR 的构建包（要同时填 `fiber_pr_number`）。 |
-| `fiber_allow_prerelease` | `false` | **是否允许自动选到 rc / 预发布版。** `false`＝只选稳定版（默认）。填 `true` 才会装上 rc；**预发布版可能没有数据库迁移**（v0.10.0-rc1 就是），需要人工处理，别在有数据的节点上随手打开。 |
+| `fiber_source` | `release` | **被测 FNN 包从哪来。** `release`＝当前固定的 `v0.10.0-rc2`（日常就用这个）；`develop`＝内测 develop 包（未发布代码，会变）；`pr`＝某个 PR 的构建包（要同时填 `fiber_pr_number`）。 |
+| `fiber_allow_prerelease` | `false` | **是否改测最新发布版（包括 rc）。** `false`＝使用已部署的 rc2；`true`＝自动选择最新发布版。新 rc 仍可能改变数据库格式，切换前需确认迁移与备份。 |
 | `fiber_pr_number` | 空 | **只有版本来源选 `pr` 时填写。** 例如测试 `nervosnetwork/fiber#1607`，只填 `1607`，不填 `#` 或完整链接；选 `release` / `develop` 时留空。本仓库的 PR 编号不填这里。脚本会校验构建包属于指定 Fiber PR。 |
 | `send_discord_report` | `false` | 勾选后本次手动运行也发送 Discord 测试通知；不勾选则只保留 GitHub Summary。GitHub `schedule` 或携带 `scheduled_date` 的每日任务自动发送，不受此选项影响。 |
 
@@ -30,7 +30,7 @@
 | 想干什么 | 怎么选 |
 | --- | --- |
 | 日常回归 / 上线前确认 | `release`（默认，什么都不用改） |
-| 提前验证下个稳定版里的改动 | `release` + `fiber_allow_prerelease=true` |
+| 提前验证最新 rc 的改动 | `release` + `fiber_allow_prerelease=true` |
 | 验证某个 PR 的修复 | `pr` + 填 `fiber_pr_number` |
 | 跟最新开发进展 | `develop`（包里没有 `fnn-cli`，脚本会保留 node1 已装的 CLI） |
 
@@ -45,7 +45,7 @@
 | `CCH_SMOKE_FNN_SOURCE` | `release` | 对应界面上的 `fiber_source`。 |
 | `CCH_SMOKE_FNN_ALLOW_PRERELEASE` | `0` | 对应界面上的 `fiber_allow_prerelease`，只接受 `0` / `1`，其它值直接报错退出。 |
 | `CCH_SMOKE_FNN_PR_NUMBER` | 空 | 对应界面上的 `fiber_pr_number`，只能与 `source=pr` 搭配。 |
-| `CCH_SMOKE_FNN_RELEASE_TAG` | 空 | **钉死某个 release 标签**（例：`v0.9.1`）。想固定跑某个版本、或专门跑某个 rc 时用。只能与 `source=release` 搭配。目前界面没有透传它，需要手工跑脚本时设。 |
+| `CCH_SMOKE_FNN_RELEASE_TAG` | 脚本为空；CI 默认 `v0.10.0-rc2` | **钉死某个 release 标签。** CI 的日常任务和普通手动任务固定使用已部署的 rc2，避免将已迁移的数据库降级到 v0.9.1。选 `develop` / `pr` 或勾选 `fiber_allow_prerelease` 时，CI 清空此值。 |
 | `CCH_SMOKE_FNN_REPOSITORY` | `nervosnetwork/fiber` | 换仓库时用，基本不动。 |
 | `CCH_SMOKE_FNN_CONF_URL` | `https://github-test-logs.ckbapp.dev/fiber/fnn.conf` | `develop` / `pr` 包的清单地址，换内测源时才有用。 |
 | `CCH_SMOKE_NODE1_DIR` / `CCH_SMOKE_NODE2_DIR` | `/home/ckb/fiber-test/testnet/node1`、`…/node2` | 两个节点目录。换机器才需要改。 |
