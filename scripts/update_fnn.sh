@@ -19,6 +19,7 @@ AUTH_TOKEN_FILE="${CCH_SMOKE_FNN_AUTH_TOKEN_FILE:-}"
 # is written to a private file. Child processes must never inherit the token.
 unset CCH_SMOKE_FNN_AUTH_TOKEN
 BACKUP_ROOT="${CCH_SMOKE_FNN_BACKUP_ROOT:-/home/ckb/fiber-test/testnet/.binary-backups}"
+DATA_BACKUP_TIMEOUT="${CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT:-600}"
 # `--check-validate` reads every persisted record, and a release that cannot
 # open the store has been observed to stall for minutes before reporting. Cap
 # it well below the workflow timeout so the rollback below always runs.
@@ -43,6 +44,11 @@ case "$ALLOW_PRERELEASE" in
     exit 1
     ;;
 esac
+
+[[ "$DATA_BACKUP_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || {
+  printf 'CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT must be a positive number of seconds\n' >&2
+  exit 1
+}
 
 log() {
   printf '[fnn-update] %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -157,7 +163,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-for command in awk curl jq tar sha256sum sudo systemctl install seq; do
+for command in awk curl df du jq tar sha256sum sudo systemctl install seq timeout; do
   require_command "$command"
 done
 
@@ -374,6 +380,23 @@ fi
 BACKUP_TAG="${TARGET_TAG//\//_}"
 
 if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
+  sudo -n install -d -m 0755 "$BACKUP_ROOT"
+  SOURCE_BYTES="$(
+    sudo -n timeout 60 du -sb "$NODE1_DIR" "$NODE2_DIR" \
+      | awk '{total += $1} END {print total + 0}'
+  )"
+  AVAILABLE_BYTES="$(df -B1 --output=avail "$BACKUP_ROOT" | tail -n 1 | tr -d '[:space:]')"
+  [[ "$SOURCE_BYTES" =~ ^[0-9]+$ && "$AVAILABLE_BYTES" =~ ^[0-9]+$ ]] || {
+    printf 'unable to measure node data or backup disk capacity\n' >&2
+    exit 1
+  }
+  if (( AVAILABLE_BYTES < SOURCE_BYTES + 1073741824 )); then
+    printf 'insufficient disk for node backup: need %s bytes plus 1 GiB reserve; available %s bytes\n' \
+      "$SOURCE_BYTES" "$AVAILABLE_BYTES" >&2
+    exit 1
+  fi
+  log "backup preflight: node data $SOURCE_BYTES bytes, available $AVAILABLE_BYTES bytes"
+
   log "stopping Fiber services before validation and replacement"
   SERVICES_STOPPED=1
   sudo -n systemctl stop "$SERVICE1" "$SERVICE2"
@@ -423,7 +446,17 @@ if [[ "$FNN_NEEDS_UPDATE" == "1" ]]; then
   log "both node stores validated in ${VALIDATION_ELAPSED}s"
 
   BACKUP_DIR="$BACKUP_ROOT/$(date -u '+%Y%m%dT%H%M%SZ')-$BACKUP_TAG"
-  sudo -n install -d -m 0755 "$BACKUP_DIR"
+  # Back up the full node directories while both services are stopped. The
+  # release may update persisted state on startup; restoring only an older
+  # binary would then be insufficient. Keep this snapshot for manual recovery,
+  # never automatically restore channel state after a node has restarted.
+  sudo -n install -d -m 0700 "$BACKUP_DIR/node-data"
+  log "backing up both stopped node directories ($SOURCE_BYTES bytes) to $BACKUP_DIR/node-data"
+  sudo -n timeout --signal=TERM --kill-after=10s "$DATA_BACKUP_TIMEOUT" \
+    cp -a "$NODE1_DIR" "$NODE2_DIR" "$BACKUP_DIR/node-data/"
+  sudo -n touch "$BACKUP_DIR/node-data/COMPLETE"
+  log "full node data backup completed"
+
   sudo -n cp -a "$NODE1_DIR/fnn" "$BACKUP_DIR/node1-fnn"
   sudo -n cp -a "$NODE2_DIR/fnn" "$BACKUP_DIR/node2-fnn"
   if [[ "$TARGET_CLI_AVAILABLE" == "1" && -e "$NODE1_DIR/fnn-cli" ]]; then

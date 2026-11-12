@@ -18,8 +18,8 @@
 | 参数 | 默认值 | 中文备注 |
 | --- | --- | --- |
 | `scheduled_date` | 空 | **排期日期，手动跑一律留空。** 只给服务器定时器用（东八区 `YYYY-MM-DD`），作用是当天去重 + 在报告里显示「计划 10:00 / 实际开始 +延迟」的对照。填了会被当成定时任务。留空则报告显示 Manual run。 |
-| `fiber_source` | `release` | **被测 FNN 包从哪来。** `release`＝当前固定的 `v0.10.0-rc2`（日常就用这个）；`develop`＝内测 develop 包（未发布代码，会变）；`pr`＝某个 PR 的构建包（要同时填 `fiber_pr_number`）。 |
-| `fiber_allow_prerelease` | `false` | **是否改测最新发布版（包括 rc）。** `false`＝使用已部署的 rc2；`true`＝自动选择最新发布版。新 rc 仍可能改变数据库格式，切换前需确认迁移与备份。 |
+| `fiber_source` | `release` | **被测 FNN 包从哪来。** `release`＝当前固定的 `v0.10.0-rc3`（日常就用这个）；`develop`＝内测 develop 包（未发布代码，会变）；`pr`＝某个 PR 的构建包（要同时填 `fiber_pr_number`）。 |
+| `fiber_allow_prerelease` | `false` | **是否改测最新发布版（包括 rc）。** `false`＝使用固定的 rc3；`true`＝自动选择最新发布版。新 rc 仍可能改变数据库格式，切换前需确认迁移与备份。 |
 | `fiber_pr_number` | 空 | **只有版本来源选 `pr` 时填写。** 例如测试 `nervosnetwork/fiber#1607`，只填 `1607`，不填 `#` 或完整链接；选 `release` / `develop` 时留空。本仓库的 PR 编号不填这里。脚本会校验构建包属于指定 Fiber PR。 |
 | `send_discord_report` | `false` | 勾选后本次手动运行也发送 Discord 测试通知；不勾选则只保留 GitHub Summary。GitHub `schedule` 或携带 `scheduled_date` 的每日任务自动发送，不受此选项影响。 |
 
@@ -45,19 +45,20 @@
 | `CCH_SMOKE_FNN_SOURCE` | `release` | 对应界面上的 `fiber_source`。 |
 | `CCH_SMOKE_FNN_ALLOW_PRERELEASE` | `0` | 对应界面上的 `fiber_allow_prerelease`，只接受 `0` / `1`，其它值直接报错退出。 |
 | `CCH_SMOKE_FNN_PR_NUMBER` | 空 | 对应界面上的 `fiber_pr_number`，只能与 `source=pr` 搭配。 |
-| `CCH_SMOKE_FNN_RELEASE_TAG` | 脚本为空；CI 默认 `v0.10.0-rc2` | **钉死某个 release 标签。** CI 的日常任务和普通手动任务固定使用已部署的 rc2，避免将已迁移的数据库降级到 v0.9.1。选 `develop` / `pr` 或勾选 `fiber_allow_prerelease` 时，CI 清空此值。 |
+| `CCH_SMOKE_FNN_RELEASE_TAG` | 脚本为空；CI 默认 `v0.10.0-rc3` | **钉死某个 release 标签。** CI 的日常任务和普通手动任务固定使用 rc3，避免将已迁移的数据库降级到 v0.9.1。选 `develop` / `pr` 或勾选 `fiber_allow_prerelease` 时，CI 清空此值。 |
 | `CCH_SMOKE_FNN_REPOSITORY` | `nervosnetwork/fiber` | 换仓库时用，基本不动。 |
 | `CCH_SMOKE_FNN_CONF_URL` | `https://github-test-logs.ckbapp.dev/fiber/fnn.conf` | `develop` / `pr` 包的清单地址，换内测源时才有用。 |
 | `CCH_SMOKE_NODE1_DIR` / `CCH_SMOKE_NODE2_DIR` | `/home/ckb/fiber-test/testnet/node1`、`…/node2` | 两个节点目录。换机器才需要改。 |
-| `CCH_SMOKE_FNN_BACKUP_ROOT` | `/home/ckb/fiber-test/testnet/.binary-backups` | 升级前旧二进制的备份位置（回滚靠它）。 |
+| `CCH_SMOKE_FNN_BACKUP_ROOT` | `/home/ckb/fiber-test/testnet/.binary-backups` | 升级前旧二进制与完整节点目录的备份位置。节点数据快照保存在私有子目录中，只供人工恢复。 |
+| `CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT` | `600` | 停服后复制两个节点目录的最长秒数。超时则恢复旧服务，不替换二进制。 |
 | `CCH_SMOKE_FNN_AUTH_TOKEN` | 空 | Fiber RPC 的 biscuit token（真实值），脚本会把它落到私有临时文件。 |
 | `CCH_SMOKE_FNN_AUTH_TOKEN_FILE` | 空 | 上面 token 的文件形式，优先级高于直接给 token。CI 里用 secret 写成文件后传这个。 |
 | `CCH_SMOKE_FNN_VALIDATION_TIMEOUT` | `300` | 新二进制 `--check-validate` 扫库的超时秒数。超时会明确报 `timed out`，并按失败处理（回滚 + 恢复服务）。设这个是为了避免卡死时耗到 workflow 30 分钟上限——那样 step 被强杀，清理逻辑来不及跑，两个 Fiber 服务会停在关闭状态。 |
 
 **升级时会发生什么**：版本没变就不重启；只有 `fnn-cli` 落后就只换 CLI、不扫数据库；
-`fnn` 有新版本才停服 → 用新二进制 `--check-validate` 扫两个库 → 通过才替换，
-不通过就**报错退出并恢复旧服务**（不会带着旧数据硬启）。数据库迁移必须人工按对应
-版本的 migration guide 做。
+`fnn` 有新版本才停服 → 用新二进制 `--check-validate` 扫两个库 → 检查磁盘空间并备份完整
+节点目录 → 通过才替换。校验或备份失败会**恢复旧服务，不替换二进制**。备份后如新版本
+启动失败，脚本会尝试恢复旧二进制；节点数据快照留给人工评估，不会自动回滚通道状态。
 
 ---
 
