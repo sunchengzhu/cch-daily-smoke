@@ -23,9 +23,6 @@ def claim(environ, state_dir: Path, now: datetime) -> dict[str, str]:
         raise ValueError("unsupported trigger")
     if environ.get("GITHUB_REF") != "refs/heads/main":
         raise ValueError("daily runs must use main")
-    if environ.get("FIBER_SOURCE", "release") != "release" or environ.get("FIBER_PR_NUMBER"):
-        raise ValueError("daily runs must use the release source")
-
     local_now = now.astimezone(SHANGHAI)
     day = requested or local_now.date().isoformat()
     if date.fromisoformat(day).isoformat() != day:

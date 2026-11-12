@@ -13,25 +13,6 @@ on:
         required: false
         default: ""
         type: string
-      fiber_source:
-        description: "测试哪个 FNN 版本？release＝固定 v0.10.0-rc3（默认）；develop＝最新开发版；pr＝指定 Fiber PR 的构建包。"
-        required: false
-        default: release
-        type: choice
-        options:
-          - release
-          - develop
-          - pr
-      fiber_allow_prerelease:
-        description: "仅对 release 生效：勾选后改测最新发布版（包括 rc）；不勾选则使用固定的 v0.10.0-rc3。"
-        required: false
-        default: false
-        type: boolean
-      fiber_pr_number:
-        description: "例如测试 nervosnetwork/fiber 的 PR #1607：上面选 pr，这里填 1607（只填数字，不填 # 或链接）。选 release / develop 时留空；本仓库的 PR 编号不填这里。"
-        required: false
-        default: ""
-        type: string
       send_discord_report:
         description: "发送本次 Discord 测试通知：勾选＝发送；不勾选＝不发送。GitHub 始终保存完整报告，每日定时任务自动发送通知。"
         required: false
@@ -60,8 +41,6 @@ jobs:
         id: claim
         env:
           SCHEDULED_DATE: ${{ inputs.scheduled_date || '' }}
-          FIBER_SOURCE: ${{ inputs.fiber_source || 'release' }}
-          FIBER_PR_NUMBER: ${{ inputs.fiber_pr_number || '' }}
         run: python3 scripts/claim_daily_smoke.py
 
   cch-daily-smoke:
@@ -72,14 +51,14 @@ jobs:
     outputs:
       started_at: ${{ steps.report_start.outputs.started_at }}
       duration_seconds: ${{ steps.report_metadata.outputs.duration_seconds }}
-      fnn_version: ${{ steps.update_fnn.outputs.fnn_version }}
-      fnn_package: ${{ steps.update_fnn.outputs.fnn_package }}
+      fnn_version: ${{ steps.verify_fnn.outputs.fnn_version }}
+      fnn_package: ${{ steps.verify_fnn.outputs.fnn_package }}
       checkout_outcome: ${{ steps.checkout.outcome }}
       python_outcome: ${{ steps.setup_python.outcome }}
       dependencies_outcome: ${{ steps.install_dependencies.outcome }}
       unit_outcome: ${{ steps.unit_tests.outcome }}
       auth_outcome: ${{ steps.prepare_auth.outcome }}
-      fnn_outcome: ${{ steps.update_fnn.outcome }}
+      fnn_outcome: ${{ steps.verify_fnn.outcome }}
       liquidity_outcome: ${{ steps.lnd_liquidity.outcome }}
       local_outcome: ${{ steps.local_cch.outcome }}
       direct_outcome: ${{ steps.fiberswap_direct.outcome }}
@@ -93,12 +72,10 @@ jobs:
       relay_report: ${{ steps.fiberswap_relay.outputs.report }}
     env:
       CCH_SMOKE_ENABLED: "1"
-      CCH_SMOKE_FNN_SOURCE: ${{ inputs.fiber_source || 'release' }}
-      CCH_SMOKE_FNN_PR_NUMBER: ${{ inputs.fiber_pr_number || '' }}
-      CCH_SMOKE_FNN_ALLOW_PRERELEASE: ${{ inputs.fiber_allow_prerelease && '1' || '0' }}
-      # The two persisted stores have already migrated past v0.9.1. Pin the
-      # tested rc3 target until a compatible stable release is published.
-      CCH_SMOKE_FNN_RELEASE_TAG: ${{ (inputs.fiber_source == 'develop' || inputs.fiber_source == 'pr' || inputs.fiber_allow_prerelease) && '' || 'v0.10.0-rc3' }}
+      CCH_SMOKE_FNN_SOURCE: release
+      # Update these only after manually upgrading and validating both nodes.
+      CCH_SMOKE_FNN_EXPECTED_TAG: v0.10.0-rc3
+      CCH_SMOKE_FNN_EXPECTED_COMMIT: 7c8b0e2
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
       CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
       CCH_SMOKE_F2_RPC: http://127.0.0.1:8229
@@ -191,9 +168,9 @@ jobs:
           } >> "$GITHUB_ENV"
           trap - EXIT HUP INT TERM
 
-      - name: Update and verify Fiber nodes
-        id: update_fnn
-        run: scripts/update_fnn.sh
+      - name: Verify installed Fiber nodes
+        id: verify_fnn
+        run: scripts/verify_fnn.sh
 
       - name: Ensure LND outbound liquidity
         id: lnd_liquidity
@@ -275,7 +252,7 @@ jobs:
       CCH_REPORT_STARTED_AT: ${{ needs.cch-daily-smoke.outputs.started_at }}
       CCH_REPORT_TRIGGER: ${{ github.event_name }}
       CCH_REPORT_BRANCH: ${{ github.ref_name }}
-      CCH_REPORT_FIBER_SOURCE: ${{ inputs.fiber_source || 'release' }}
+      CCH_REPORT_FIBER_SOURCE: release
       CCH_REPORT_FNN_VERSION: ${{ needs.cch-daily-smoke.outputs.fnn_version }}
       CCH_REPORT_FNN_PACKAGE: ${{ needs.cch-daily-smoke.outputs.fnn_package }}
       CCH_REPORT_TOTAL_SECONDS: ${{ needs.cch-daily-smoke.outputs.duration_seconds }}

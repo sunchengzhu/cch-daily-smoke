@@ -7,15 +7,15 @@ WORKFLOW = (
     / "workflows"
     / "cch-daily-smoke.yml"
 )
-UPDATE_FNN = Path(__file__).resolve().parents[1] / "scripts" / "update_fnn.sh"
+VERIFY_FNN = Path(__file__).resolve().parents[1] / "scripts" / "verify_fnn.sh"
 
 
 def workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
-def update_fnn_text() -> str:
-    return UPDATE_FNN.read_text(encoding="utf-8")
+def verify_fnn_text() -> str:
+    return VERIFY_FNN.read_text(encoding="utf-8")
 
 
 def test_discord_report_runs_for_daily_claim_or_gate_failure():
@@ -99,21 +99,20 @@ def test_ci_summary_is_independent_of_discord_and_written_before_notification():
     assert "DISCORD_WEBHOOK_URL" in notification
 
 
-def test_fnn_metadata_outputs_are_emitted_before_fallible_update_stages():
-    script = update_fnn_text()
+def test_daily_workflow_only_verifies_the_installed_fnn():
+    workflow = workflow_text()
+    script = verify_fnn_text()
+    job = workflow.split("  cch-daily-smoke:\n", 1)[1].split("\n  report:\n", 1)[0]
 
-    package_output = script.index(
-        'write_github_output fnn_package "$TARGET_LABEL"'
-    )
-    download = script.index('log "downloading $ASSET_NAME"')
-    version_output = script.index(
-        'write_github_output fnn_version "$TARGET_FNN_VERSION"'
-    )
-    service_update = script.index('if [[ "$FNN_NEEDS_UPDATE" == "1" ]]')
-    rpc_health = script.index('log "waiting for Fiber RPC health"')
-
-    assert package_output < download
-    assert version_output < service_update < rpc_health
+    assert "run: scripts/verify_fnn.sh" in job
+    assert "scripts/update_fnn.sh" not in workflow
+    assert "fiber_allow_prerelease:" not in workflow
+    assert "fiber_source:" not in workflow
+    assert "CCH_SMOKE_FNN_EXPECTED_TAG: v0.10.0-rc3" in job
+    assert "CCH_SMOKE_FNN_EXPECTED_COMMIT: 7c8b0e2" in job
+    assert job.index("id: verify_fnn") < job.index("id: lnd_liquidity")
+    assert 'write_output fnn_package "installed release $EXPECTED_TAG"' in script
+    assert 'write_output fnn_version "$version"' in script
 
 
 def test_relay_failure_class_reaches_the_report_job():

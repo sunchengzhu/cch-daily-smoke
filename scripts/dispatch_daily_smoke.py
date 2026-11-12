@@ -146,7 +146,7 @@ def dispatch(state_dir=DEFAULT_STATE_DIR, scheduled_date=None, now=None):
             raise RuntimeError(f"Uncertain dispatch for {day}; no matching run found. Pending state retained; manual review required.")
         save_state(path, {"date": day.isoformat(), "status": "pending", "requested_at": now.isoformat()})
         response = gh_api(f"{ENDPOINT}/dispatches", payload={"ref": "main", "inputs": {
-            "fiber_source": "release", "send_discord_report": True, "scheduled_date": day.isoformat()}})
+            "send_discord_report": True, "scheduled_date": day.isoformat()}})
         run_id = response.get("workflow_run_id") if isinstance(response, dict) else None
         if response is not None and (type(run_id) is not int or run_id <= 0):
             raise RuntimeError("Unexpected dispatch response. Pending state retained; manual review required.")

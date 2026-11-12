@@ -60,7 +60,7 @@ def test_200_and_204_are_persisted_and_not_redispatched(github, tmp_path, respon
     command, payload = posts(github)[0]
     assert len(posts(github)) == 1
     assert payload == {"ref": "main", "inputs": {
-        "fiber_source": "release", "send_discord_report": True, "scheduled_date": DAY}}
+        "send_discord_report": True, "scheduled_date": DAY}}
     assert command[-2:] == ["--input", "-"]
     assert "X-GitHub-Api-Version: 2026-03-10" in command
     assert json.loads((tmp_path / f"{DAY}.json").read_text())["status"] == "accepted"

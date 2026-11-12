@@ -59,7 +59,6 @@ def test_next_day_is_independent(tmp_path):
     {"SCHEDULED_DATE": "../bad"},
     {"SCHEDULED_DATE": "20260913"},
     {"GITHUB_REF": "refs/heads/develop"},
-    {"FIBER_SOURCE": "pr"},
 ])
 def test_invalid_daily_inputs_fail_closed(tmp_path, overrides):
     with pytest.raises(ValueError):
