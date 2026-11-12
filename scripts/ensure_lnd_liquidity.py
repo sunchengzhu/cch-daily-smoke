@@ -5,6 +5,7 @@ import argparse
 import math
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -16,12 +17,60 @@ if str(TESTS_DIR) not in sys.path:
 from test_cch_daily_smoke import (  # noqa: E402
     CchSmokeConfig,
     lnd_b_liquidity,
+    lncli_json,
     top_up_lnd_b_if_needed,
 )
 
 
 LOAD_HEADROOM_RATIO = 0.20
 MIN_LOAD_HEADROOM_SATS = 100_000
+PEER_RECONNECT_WAIT_SECONDS = 30
+
+
+def ensure_local_lnd_peer(config) -> None:
+    """Reconnect the existing lnd-b -> lnd-a channel after a peer disconnect."""
+
+    pubkey = lncli_json(config, "lnd-a", ["getinfo"])["identity_pubkey"]
+
+    def matching_channels():
+        return [
+            channel
+            for channel in lncli_json(config, "lnd-b", ["listchannels"]).get(
+                "channels", []
+            )
+            if channel.get("remote_pubkey") == pubkey
+            and (
+                config.lnd_channel_id is None
+                or channel.get("chan_id") == config.lnd_channel_id
+            )
+        ]
+
+    channels = matching_channels()
+    if not channels or any(channel.get("active") for channel in channels):
+        return
+
+    peers = lncli_json(config, "lnd-b", ["listpeers"]).get("peers", [])
+    if not any(peer.get("pub_key") == pubkey for peer in peers):
+        address = os.environ.get(
+            "CCH_SMOKE_LND_A_PEER_ADDR", f"{config.lnd_a_container}:9735"
+        )
+        print(
+            f"[lnd-liquidity] channel inactive; reconnecting lnd-b to "
+            f"lnd-a at {address}",
+            flush=True,
+        )
+        lncli_json(config, "lnd-b", ["connect", "--perm", f"{pubkey}@{address}"])
+
+    deadline = time.monotonic() + PEER_RECONNECT_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if any(channel.get("active") for channel in matching_channels()):
+            print("[lnd-liquidity] local LND channel active", flush=True)
+            return
+        time.sleep(2)
+    raise RuntimeError(
+        "lnd-b -> lnd-a channel remained inactive after peer reconnect; "
+        "inspect both nodes before attempting a payment"
+    )
 
 
 def minimum_spendable_for_load(
@@ -105,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
+    ensure_local_lnd_peer(config)
     before = lnd_b_liquidity(config)
     print(
         "[lnd-liquidity] preflight: "

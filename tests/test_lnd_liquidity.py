@@ -1,7 +1,55 @@
 from types import SimpleNamespace
 
 import test_cch_daily_smoke as smoke
+import scripts.ensure_lnd_liquidity as liquidity
 from scripts.ensure_lnd_liquidity import minimum_spendable_for_load
+
+
+def test_inactive_local_channel_reconnects_existing_peer(monkeypatch):
+    config = SimpleNamespace(lnd_a_container="lnd-a", lnd_channel_id=None)
+    monkeypatch.delenv("CCH_SMOKE_LND_A_PEER_ADDR", raising=False)
+    calls = []
+    channel_checks = iter([False, True])
+
+    def fake_lncli(_config, node, args):
+        calls.append((node, args))
+        if args == ["getinfo"]:
+            return {"identity_pubkey": "a-pubkey"}
+        if args == ["listchannels"]:
+            return {
+                "channels": [
+                    {"remote_pubkey": "a-pubkey", "active": next(channel_checks)}
+                ]
+            }
+        if args == ["listpeers"]:
+            return {"peers": []}
+        if args[0] == "connect":
+            return {"status": "initiated"}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(liquidity, "lncli_json", fake_lncli)
+    liquidity.ensure_local_lnd_peer(config)
+
+    assert ("lnd-b", ["connect", "--perm", "a-pubkey@lnd-a:9735"]) in calls
+    assert calls.count(("lnd-b", ["listchannels"])) == 2
+
+
+def test_active_local_channel_does_not_reconnect(monkeypatch):
+    config = SimpleNamespace(lnd_a_container="lnd-a", lnd_channel_id=None)
+    calls = []
+
+    def fake_lncli(_config, node, args):
+        calls.append((node, args))
+        if args == ["getinfo"]:
+            return {"identity_pubkey": "a-pubkey"}
+        if args == ["listchannels"]:
+            return {"channels": [{"remote_pubkey": "a-pubkey", "active": True}]}
+        raise AssertionError(args)
+
+    monkeypatch.setattr(liquidity, "lncli_json", fake_lncli)
+    liquidity.ensure_local_lnd_peer(config)
+
+    assert calls == [("lnd-a", ["getinfo"]), ("lnd-b", ["listchannels"])]
 
 
 def test_load_liquidity_keeps_base_floor_for_small_run():
