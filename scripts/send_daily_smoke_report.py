@@ -26,6 +26,8 @@ FAILURE_COLOR = 0xE74C3C
 ENVIRONMENT_COLOR = 0xE67E22
 EMBED_TOTAL_LIMIT = 6000
 FIELD_VALUE_LIMIT = 1024
+FIBER_RELEASE_API = "https://api.github.com/repos/nervosnetwork/fiber/releases/latest"
+FIBER_RELEASE_BASE = "https://github.com/nervosnetwork/fiber/releases/tag/"
 
 # Mirrors tests/smoke_failure_class.py. The report runs as a plain script where
 # the tests directory is not importable, so the value is repeated here; a unit
@@ -212,6 +214,7 @@ def collect_report(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
             "diagnostic": _diagnostic(diagnostic),
         }
 
+    fnn_check, _check_error = _parse_scenario(env.get("CCH_REPORT_FNN_CHECK"))
     return {
         "job_result": env.get("CCH_REPORT_JOB_RESULT", "unknown"),
         "failure_class": env.get(FAILURE_CLASS_ENV, "").strip(),
@@ -219,6 +222,8 @@ def collect_report(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
         "fiber_source": env.get("CCH_REPORT_FIBER_SOURCE", "unknown"),
         "fnn_version": env.get("CCH_REPORT_FNN_VERSION", "unknown"),
         "fnn_package": env.get("CCH_REPORT_FNN_PACKAGE", "unknown"),
+        "fnn_check": fnn_check or {},
+        "fnn_latest_tag": env.get("CCH_REPORT_FNN_LATEST_TAG", ""),
         "total_seconds": env.get("CCH_REPORT_TOTAL_SECONDS"),
         "scheduled_date": env.get("CCH_REPORT_SCHEDULED_DATE"),
         "started_at": env.get("CCH_REPORT_STARTED_AT"),
@@ -241,6 +246,78 @@ def collect_report(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
         "run_attempt": env.get("CCH_REPORT_RUN_ATTEMPT", "unknown"),
         "sha": env.get("CCH_REPORT_SHA", "unknown"),
     }
+
+
+def _fnn_version_mismatch(report: Mapping[str, Any]) -> bool:
+    return (
+        _outcome(report.get("preflight", {}).get("FNN nodes"))[0] == "failure"
+        and report.get("fnn_check", {}).get("status") == "version-mismatch"
+    )
+
+
+def _fnn_version_lines(report: Mapping[str, Any]) -> list[str]:
+    check = report.get("fnn_check", {})
+    if not check:
+        return []
+    lines = []
+    if _fnn_version_mismatch(report):
+        lines.append("❌ **Fiber 版本不匹配，预检失败。**")
+    lines.append(
+        f"CI 预期: {_one_line(check.get('expected_tag'))} "
+        f"({_one_line(check.get('expected_commit'))})"
+    )
+    nodes = check.get("nodes")
+    running = check.get("running")
+    for node in ("node1", "node2"):
+        installed = nodes.get(node) if isinstance(nodes, Mapping) else None
+        lines.append(f"{node}: {_one_line(installed)}")
+        if isinstance(running, Mapping) and node in running:
+            lines.append(f"{node} RPC: {_one_line(running[node])}")
+    lines.append(f"CLI: {_one_line(check.get('cli_version'))}")
+    latest = str(report.get("fnn_latest_tag", ""))
+    if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", latest):
+        lines.append(f"最新正式版: [{latest}]({FIBER_RELEASE_BASE}{latest})")
+        latest_numbers = tuple(map(int, latest[1:].split(".")))
+        for installed in (nodes.values() if isinstance(nodes, Mapping) else []):
+            tag = re.search(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)(-[A-Za-z0-9.-]+)?", str(installed))
+            if tag and (
+                tuple(map(int, tag.group(1, 2, 3))) < latest_numbers
+                or (tuple(map(int, tag.group(1, 2, 3))) == latest_numbers and tag.group(4))
+            ):
+                lines.append("⚠️ 节点版本落后最新正式版，需人工确认升级。")
+                break
+    else:
+        lines.append("最新正式版: 查询不可用")
+    if _fnn_version_mismatch(report):
+        lines.append("处理: 人工统一两台节点、CLI 和 CI 预期版本后重跑。")
+        if all(
+            _outcome(report.get("scenarios", {}).get(key, {}).get("outcome"))[0] == "skipped"
+            for key, _label in SCENARIOS
+        ):
+            lines.append("三组支付测试均未运行。")
+    else:
+        lines.append("最新发布仅供人工升级参考；失败原因见检查结果。")
+    return lines
+
+
+def check_latest_fiber_release() -> str:
+    """Read release metadata independently of verification; never install it."""
+    request = urllib.request.Request(
+        FIBER_RELEASE_API,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "cch-daily-smoke/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            release = json.loads(response.read())
+        tag = release.get("tag_name", "")
+        if release.get("prerelease") or release.get("draft") or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+            raise ValueError("release is not a stable version")
+    except (OSError, ValueError, AttributeError, TypeError):
+        tag = ""
+    with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+        output.write(f"CCH_REPORT_FNN_LATEST_TAG={tag}\n")
+    print(f"Latest stable Fiber release: {tag or 'unavailable (informational only)'}")
+    return tag
 
 
 def _started_at(report: Mapping[str, Any]) -> datetime | None:
@@ -402,11 +479,16 @@ def build_github_summary(report: Mapping[str, Any]) -> str:
             f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed."
         )
     lines = [
-        "# CCH Daily Smoke · Testnet",
+        f"# CCH Daily Smoke · {'Fiber 版本不匹配' if _fnn_version_mismatch(report) else 'Testnet'}",
         "",
         f"{headline} · ⏱ {_duration(report.get('total_seconds'))}",
         "",
     ]
+    if _fnn_version_mismatch(report):
+        lines.extend(["❌ **Fiber 版本不匹配：节点或 CLI 与 CI 固定版本不一致。**", ""])
+    version_lines = _fnn_version_lines(report)
+    if version_lines:
+        lines.extend(["## Fiber 版本检查", "", *(f"- {line}" for line in version_lines), ""])
     if environment_fault:
         lines.extend([_environment_note(report), ""])
     lines.extend([
@@ -506,6 +588,9 @@ def build_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         {"name": "Checks", "value": _truncate(checks, FIELD_VALUE_LIMIT), "inline": False},
         {"name": "Scenarios", "value": _truncate("\n".join(_scenario_lines(report)), FIELD_VALUE_LIMIT), "inline": False},
     ]
+    version_lines = _fnn_version_lines(report)
+    if version_lines:
+        fields.insert(0, {"name": "Fiber 版本检查", "value": _truncate("\n".join(version_lines), FIELD_VALUE_LIMIT), "inline": False})
     diagnosis = _compact_diagnosis(report)
     if diagnosis:
         fields.append({"name": "Failure diagnosis", "value": diagnosis, "inline": False})
@@ -525,10 +610,12 @@ def build_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
             "workflow did not pass."
         )
         color = FAILURE_COLOR
+    if _fnn_version_mismatch(report):
+        description = f"**Fiber 版本不匹配** · {description}"
     description += f" · ⏱ {_duration(report.get('total_seconds'))}"
     title_emoji = "🔌" if (environment_fault and not passed) else emoji
     embed = {
-        "title": _truncate(f"{title_emoji} CCH Daily Smoke · Testnet · #{_one_line(report.get('run_number'), 'unknown')}", 256),
+        "title": _truncate(f"{title_emoji} CCH Daily Smoke · {'Fiber 版本不匹配' if _fnn_version_mismatch(report) else 'Testnet'} · #{_one_line(report.get('run_number'), 'unknown')}", 256),
         "description": description,
         "color": color,
         "fields": fields,
@@ -537,7 +624,7 @@ def build_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     run_url = _text(report.get("run_url"), "")
     if run_url:
         embed["url"] = run_url
-    # Four bounded fields + title/description/footer stay below 6,000 UTF-16 units.
+    # Five bounded fields + title/description/footer stay below 6,000 UTF-16 units.
     return {"allowed_mentions": {"parse": []}, "embeds": [embed]}
 
 
@@ -579,7 +666,11 @@ def main(argv: list[str] | None = None) -> None:
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--summary-only", action="store_true", help="Write the full GitHub Actions summary without sending Discord")
     modes.add_argument("--dry-run", action="store_true", help="Print the Discord payload without sending it")
+    modes.add_argument("--check-latest-release", action="store_true", help="Write latest stable Fiber release metadata to GITHUB_ENV without upgrading")
     args = parser.parse_args(argv)
+    if args.check_latest_release:
+        check_latest_fiber_release()
+        return
     report = collect_report()
     if args.summary_only:
         summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()

@@ -19,6 +19,8 @@
 日常任务运行 `scripts/verify_fnn.sh`，只读取两台节点的二进制版本并检查两个 RPC。
 预期版本写在工作流的 `CCH_SMOKE_FNN_EXPECTED_TAG` 和
 `CCH_SMOKE_FNN_EXPECTED_COMMIT`。版本不符时停止 smoke，节点保持原状。
+报告会保留两台节点及 CLI 的实际版本，并在 GitHub/Discord 标题标明版本不匹配。
+报告阶段独立查询最新正式 release，仅供人工升级参考，不会自动升级或要求每日跟随最新包。
 
 需要升级时，由人或 Codex 确定目标版本、检查迁移与备份，再单独运行
 `scripts/update_fnn.sh`。release 升级必须显式设置 `CCH_SMOKE_FNN_RELEASE_TAG`；
@@ -31,7 +33,7 @@
 | `CCH_SMOKE_FNN_PR_NUMBER` | 空 | 仅升级 Fiber PR 包时填写编号。 |
 | `CCH_SMOKE_FNN_AUTH_TOKEN_FILE` | 空 | 两个 RPC 的认证文件；每日校验也使用它。 |
 | `CCH_SMOKE_FNN_BACKUP_ROOT` | `/home/ckb/fiber-test/testnet/.binary-backups` | 停服数据快照和旧二进制的存放位置。 |
-| `CCH_SMOKE_FNN_VALIDATION_TIMEOUT` | `300` | 停服数据校验的秒数上限；大库升级前需评估并调整。 |
+| `CCH_SMOKE_FNN_VALIDATION_TIMEOUT` | `1800` | 两台停服数据库并行校验共用的秒数上限（30 分钟）；调用任务还需预留备份、健康检查及恢复时间。 |
 | `CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT` | `600` | 每个节点停服备份的秒数上限。 |
 
 人工升级仍会检查磁盘、停服务、校验数据、备份，再替换二进制并检查健康；

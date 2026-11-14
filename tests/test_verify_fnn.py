@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -26,15 +27,15 @@ def fake_node(path: Path, version: str) -> None:
     binary.chmod(0o755)
 
 
-def run_verify(tmp_path: Path, node2_version: str) -> subprocess.CompletedProcess[str]:
+def run_verify(tmp_path: Path, node2_version: str, *, node1_version=None, cli_version="fnn-cli 0.10.0-rc3") -> subprocess.CompletedProcess[str]:
     node1, node2 = tmp_path / "node1", tmp_path / "node2"
     expected = "fnn Fiber v0.10.0-rc3 (7c8b0e2 2026-11-12)"
-    fake_node(node1, expected)
+    fake_node(node1, node1_version or expected)
     fake_node(node2, node2_version)
     cli = node1 / "fnn-cli"
     cli.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = --version ]; then echo 'fnn-cli 0.10.0-rc3'; else "
+        f"if [ \"$1\" = --version ]; then echo '{cli_version}'; else "
         "echo '{\"version\":\"0.10.0-rc3\",\"commit_hash\":\"7c8b0e2 2026-11-12\","
         "\"pubkey\":\"test-pubkey\"}'; fi\n"
     )
@@ -69,8 +70,29 @@ def test_mismatched_node_fails_without_replacing_it(tmp_path):
     result = run_verify(tmp_path, old_version)
 
     assert result.returncode != 0
-    assert "upgrade it manually" in result.stderr
+    assert "Manually align both nodes" in result.stderr
     assert old_version in (tmp_path / "node2" / "fnn").read_text()
+
+
+def test_first_node_mismatch_still_reports_both_nodes_and_cli(tmp_path):
+    result = run_verify(
+        tmp_path,
+        "fnn Fiber v0.10.0 (d6868d1 2026-11-13)",
+        node1_version="fnn Fiber v0.10.1 (d9b6bbd 2026-11-14)",
+        cli_version="fnn-cli 0.9.1",
+    )
+    outputs = dict(line.split("=", 1) for line in (tmp_path / "output").read_text().splitlines())
+    check = json.loads(outputs["fnn_check"])
+
+    assert result.returncode == 1
+    assert check["status"] == "version-mismatch"
+    assert check["expected_tag"] == "v0.10.0-rc3"
+    assert "v0.10.1" in check["nodes"]["node1"]
+    assert "v0.10.0" in check["nodes"]["node2"]
+    assert check["cli_version"] == "fnn-cli 0.9.1"
+    assert len(check["problems"]) == 3
+    assert "test-token" not in (result.stdout + result.stderr + outputs["fnn_check"])
+    assert "installed release" not in outputs["fnn_package"]
 
 
 def test_manual_release_upgrade_requires_explicit_tag(tmp_path):
