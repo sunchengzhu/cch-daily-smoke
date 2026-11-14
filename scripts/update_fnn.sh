@@ -21,9 +21,10 @@ unset CCH_SMOKE_FNN_AUTH_TOKEN
 BACKUP_ROOT="${CCH_SMOKE_FNN_BACKUP_ROOT:-/home/ckb/fiber-test/testnet/.binary-backups}"
 DATA_BACKUP_TIMEOUT="${CCH_SMOKE_FNN_DATA_BACKUP_TIMEOUT:-600}"
 # `--check-validate` reads every persisted record, and a release that cannot
-# open the store has been observed to stall for minutes before reporting. Cap
-# it well below the workflow timeout so the rollback below always runs.
-VALIDATION_TIMEOUT="${CCH_SMOKE_FNN_VALIDATION_TIMEOUT:-300}"
+# open the store has been observed to stall for minutes before reporting. Allow
+# large stores to finish, while keeping a shared deadline for both validators.
+# The caller's timeout must also leave room for backups, RPC checks and rollback.
+VALIDATION_TIMEOUT="${CCH_SMOKE_FNN_VALIDATION_TIMEOUT:-1800}"
 
 # This script is for an operator-initiated upgrade. Never infer a target from
 # the newest release: each new build needs its own compatibility review.
