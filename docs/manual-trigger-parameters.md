@@ -19,6 +19,8 @@
 日常任务运行 `scripts/verify_fnn.sh`，只读取两台节点的二进制版本并检查两个 RPC。
 预期版本写在工作流的 `CCH_SMOKE_FNN_EXPECTED_TAG` 和
 `CCH_SMOKE_FNN_EXPECTED_COMMIT`。版本不符时停止 smoke，节点保持原状。
+报告会保留两台节点及 CLI 的实际版本，并在 GitHub/Discord 标题标明版本不匹配。
+报告阶段独立查询最新正式 release，仅供人工升级参考，不会自动升级或要求每日跟随最新包。
 
 需要升级时，由人或 Codex 确定目标版本、检查迁移与备份，再单独运行
 `scripts/update_fnn.sh`。release 升级必须显式设置 `CCH_SMOKE_FNN_RELEASE_TAG`；

@@ -108,11 +108,14 @@ def test_daily_workflow_only_verifies_the_installed_fnn():
     assert "scripts/update_fnn.sh" not in workflow
     assert "fiber_allow_prerelease:" not in workflow
     assert "fiber_source:" not in workflow
-    assert "CCH_SMOKE_FNN_EXPECTED_TAG: v0.10.0-rc3" in job
-    assert "CCH_SMOKE_FNN_EXPECTED_COMMIT: 7c8b0e2" in job
+    assert "CCH_SMOKE_FNN_EXPECTED_TAG: v0.10.1" in job
+    assert "CCH_SMOKE_FNN_EXPECTED_COMMIT: d9b6bbd" in job
     assert job.index("id: verify_fnn") < job.index("id: lnd_liquidity")
     assert 'write_output fnn_package "installed release $EXPECTED_TAG"' in script
     assert 'write_output fnn_version "$version"' in script
+    assert "fnn_check: ${{ steps.verify_fnn.outputs.fnn_check }}" in job
+    assert "CCH_REPORT_FNN_CHECK: ${{ needs.cch-daily-smoke.outputs.fnn_check }}" in workflow
+    assert "--check-latest-release" in workflow
 
 
 def test_relay_failure_class_reaches_the_report_job():

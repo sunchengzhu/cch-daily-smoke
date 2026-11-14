@@ -53,6 +53,7 @@ jobs:
       duration_seconds: ${{ steps.report_metadata.outputs.duration_seconds }}
       fnn_version: ${{ steps.verify_fnn.outputs.fnn_version }}
       fnn_package: ${{ steps.verify_fnn.outputs.fnn_package }}
+      fnn_check: ${{ steps.verify_fnn.outputs.fnn_check }}
       checkout_outcome: ${{ steps.checkout.outcome }}
       python_outcome: ${{ steps.setup_python.outcome }}
       dependencies_outcome: ${{ steps.install_dependencies.outcome }}
@@ -74,8 +75,8 @@ jobs:
       CCH_SMOKE_ENABLED: "1"
       CCH_SMOKE_FNN_SOURCE: release
       # Update these only after manually upgrading and validating both nodes.
-      CCH_SMOKE_FNN_EXPECTED_TAG: v0.10.0-rc3
-      CCH_SMOKE_FNN_EXPECTED_COMMIT: 7c8b0e2
+      CCH_SMOKE_FNN_EXPECTED_TAG: v0.10.1
+      CCH_SMOKE_FNN_EXPECTED_COMMIT: d9b6bbd
       CCH_SMOKE_FNN_CLI: /home/ckb/fiber-test/testnet/node1/fnn-cli
       CCH_SMOKE_F1_RPC: http://127.0.0.1:8227
       CCH_SMOKE_F2_RPC: http://127.0.0.1:8229
@@ -255,6 +256,7 @@ jobs:
       CCH_REPORT_FIBER_SOURCE: release
       CCH_REPORT_FNN_VERSION: ${{ needs.cch-daily-smoke.outputs.fnn_version }}
       CCH_REPORT_FNN_PACKAGE: ${{ needs.cch-daily-smoke.outputs.fnn_package }}
+      CCH_REPORT_FNN_CHECK: ${{ needs.cch-daily-smoke.outputs.fnn_check }}
       CCH_REPORT_TOTAL_SECONDS: ${{ needs.cch-daily-smoke.outputs.duration_seconds }}
       CCH_REPORT_CHECKOUT_OUTCOME: ${{ needs.cch-daily-smoke.outputs.checkout_outcome }}
       CCH_REPORT_PYTHON_OUTCOME: ${{ needs.cch-daily-smoke.outputs.python_outcome }}
@@ -281,6 +283,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         continue-on-error: true
+
+      - name: Read latest stable Fiber release for the report
+        if: ${{ always() }}
+        run: python3 scripts/send_daily_smoke_report.py --check-latest-release
 
       - name: Write detailed CI report
         if: ${{ always() }}
