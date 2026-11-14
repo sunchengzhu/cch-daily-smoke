@@ -479,7 +479,7 @@ def build_github_summary(report: Mapping[str, Any]) -> str:
             f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed."
         )
     lines = [
-        "# CCH Daily Smoke · Testnet",
+        f"# CCH Daily Smoke · {'Fiber 版本不匹配' if _fnn_version_mismatch(report) else 'Testnet'}",
         "",
         f"{headline} · ⏱ {_duration(report.get('total_seconds'))}",
         "",

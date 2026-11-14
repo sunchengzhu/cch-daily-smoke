@@ -41,6 +41,7 @@ def test_version_mismatch_is_visible_in_both_report_headlines_and_all_versions()
 
     assert "Fiber 版本不匹配" in embed["title"]
     assert "Fiber 版本不匹配" in embed["description"]
+    assert summary.startswith("# CCH Daily Smoke · Fiber 版本不匹配\n")
     assert summary.index("Fiber 版本不匹配") < summary.index("## Run overview")
     for value in ("v0.10.0-rc3", "d6868d1", "node1", "node2", "CLI", "v0.10.1", "三组支付测试均未运行", "人工统一"):
         assert value in versions
