@@ -488,7 +488,7 @@ def build_github_summary(report: Mapping[str, Any]) -> str:
         lines.extend(["❌ **Fiber 版本不匹配：节点或 CLI 与 CI 固定版本不一致。**", ""])
     version_lines = _fnn_version_lines(report)
     if version_lines:
-        lines.extend(["## Fiber 版本检查", "", *version_lines, ""])
+        lines.extend(["## Fiber 版本检查", "", *(f"- {line}" for line in version_lines), ""])
     if environment_fault:
         lines.extend([_environment_note(report), ""])
     lines.extend([
