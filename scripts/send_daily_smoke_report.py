@@ -255,48 +255,55 @@ def _fnn_version_mismatch(report: Mapping[str, Any]) -> bool:
     )
 
 
-def _fnn_version_lines(report: Mapping[str, Any]) -> list[str]:
-    check = report.get("fnn_check", {})
-    if not check:
-        return []
-    lines = []
-    if _fnn_version_mismatch(report):
-        lines.append("❌ **Fiber 版本不匹配，预检失败。**")
-    lines.append(
-        f"CI 预期: {_one_line(check.get('expected_tag'))} "
-        f"({_one_line(check.get('expected_commit'))})"
-    )
-    nodes = check.get("nodes")
-    running = check.get("running")
-    for node in ("node1", "node2"):
-        installed = nodes.get(node) if isinstance(nodes, Mapping) else None
-        lines.append(f"{node}: {_one_line(installed)}")
-        if isinstance(running, Mapping) and node in running:
-            lines.append(f"{node} RPC: {_one_line(running[node])}")
-    lines.append(f"CLI: {_one_line(check.get('cli_version'))}")
+def _fiber_version_summary(report: Mapping[str, Any]) -> str:
+    """Show the installed release once; latest metadata never replaces it."""
+    version = report.get("fnn_version")
+    tag = re.search(r"\bv?([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?)\b", str(version))
+    if not tag or report.get("fiber_source") != "release":
+        return (
+            f"`{_truncate(_md(version), 100)}`"
+            f" · {_truncate(_md(report.get('fiber_source')), 80)}"
+        )
+    installed = tag[1]
+    text = f"[{installed} release]({FIBER_RELEASE_BASE}v{installed})"
     latest = str(report.get("fnn_latest_tag", ""))
     if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", latest):
-        lines.append(f"最新正式版: [{latest}]({FIBER_RELEASE_BASE}{latest})")
         latest_numbers = tuple(map(int, latest[1:].split(".")))
-        for installed in (nodes.values() if isinstance(nodes, Mapping) else []):
-            tag = re.search(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)(-[A-Za-z0-9.-]+)?", str(installed))
-            if tag and (
-                tuple(map(int, tag.group(1, 2, 3))) < latest_numbers
-                or (tuple(map(int, tag.group(1, 2, 3))) == latest_numbers and tag.group(4))
-            ):
-                lines.append("⚠️ 节点版本落后最新正式版，需人工确认升级。")
-                break
+        installed_numbers = tuple(map(int, installed.split("-", 1)[0].split(".")))
+        if latest_numbers > installed_numbers or (latest_numbers == installed_numbers and "-" in installed):
+            text += f" · latest [{latest[1:]} release]({FIBER_RELEASE_BASE}{latest})"
+    return text
+
+
+def _fnn_version_lines(report: Mapping[str, Any]) -> list[str]:
+    """Expand version details only when the preflight reports a mismatch."""
+    if not _fnn_version_mismatch(report):
+        return []
+    check = report.get("fnn_check", {})
+    lines = [
+        f"Expected: {_one_line(check.get('expected_tag'))} "
+        f"({_one_line(check.get('expected_commit'))})"
+    ]
+    problems = check.get("problems")
+    if isinstance(problems, list) and problems:
+        lines.extend(
+            f"{_one_line(problem.get('component'))}: {_one_line(problem.get('actual'))}"
+            for problem in problems if isinstance(problem, Mapping)
+        )
     else:
-        lines.append("最新正式版: 查询不可用")
-    if _fnn_version_mismatch(report):
-        lines.append("处理: 人工统一两台节点、CLI 和 CI 预期版本后重跑。")
-        if all(
-            _outcome(report.get("scenarios", {}).get(key, {}).get("outcome"))[0] == "skipped"
-            for key, _label in SCENARIOS
-        ):
-            lines.append("三组支付测试均未运行。")
-    else:
-        lines.append("最新发布仅供人工升级参考；失败原因见检查结果。")
+        nodes = check.get("nodes")
+        running = check.get("running")
+        for node in ("node1", "node2"):
+            installed = nodes.get(node) if isinstance(nodes, Mapping) else None
+            lines.append(f"{node}: {_one_line(installed)}")
+            if isinstance(running, Mapping) and node in running:
+                lines.append(f"{node} RPC: {_one_line(running[node])}")
+        lines.append(f"CLI: {_one_line(check.get('cli_version'))}")
+    if all(
+        _outcome(report.get("scenarios", {}).get(key, {}).get("outcome"))[0] == "skipped"
+        for key, _label in SCENARIOS
+    ):
+        lines.append("No payment scenarios ran.")
     return lines
 
 
@@ -336,10 +343,7 @@ def _run_overview(report: Mapping[str, Any]) -> str:
     started = _started_at(report)
     timing = f"Started {started:%Y-%m-%d %H:%M:%S} CST" if started else "Start time unavailable"
     lines = [f"{trigger} · {timing}"]
-    lines.append(
-        f"FNN `{_truncate(_one_line(report.get('fnn_version'), 'unknown'), 100)}`"
-        f" · {_truncate(_one_line(report.get('fiber_source'), 'unknown'), 80)}"
-    )
+    lines.append(f"Fiber {_fiber_version_summary(report)}")
     attempt = _one_line(report.get("run_attempt"), "unknown")
     if attempt not in {"1", "unknown"}:
         lines.append(f"Retry {attempt}")
@@ -479,16 +483,14 @@ def build_github_summary(report: Mapping[str, Any]) -> str:
             f"{_passed_count(report)}/{len(SCENARIOS)} smoke scenarios passed."
         )
     lines = [
-        f"# CCH Daily Smoke · {'Fiber 版本不匹配' if _fnn_version_mismatch(report) else 'Testnet'}",
+        f"# CCH Daily Smoke · {'Fiber version mismatch' if _fnn_version_mismatch(report) else 'Testnet'}",
         "",
         f"{headline} · ⏱ {_duration(report.get('total_seconds'))}",
         "",
     ]
-    if _fnn_version_mismatch(report):
-        lines.extend(["❌ **Fiber 版本不匹配：节点或 CLI 与 CI 固定版本不一致。**", ""])
     version_lines = _fnn_version_lines(report)
     if version_lines:
-        lines.extend(["## Fiber 版本检查", "", *(f"- {line}" for line in version_lines), ""])
+        lines.extend(["## Version check", "", *(f"- {_md(line)}" for line in version_lines), ""])
     if environment_fault:
         lines.extend([_environment_note(report), ""])
     lines.extend([
@@ -502,13 +504,11 @@ def build_github_summary(report: Mapping[str, Any]) -> str:
         "Run": f"#{_text(report.get('run_number'))} · attempt {_text(report.get('run_attempt'))}",
         "Branch": report.get("branch"),
         "Commit": report.get("sha"),
-        "Fiber source": report.get("fiber_source"),
-        "FNN version": report.get("fnn_version"),
-        "Package": report.get("fnn_package"),
+        "Fiber": _fiber_version_summary(report),
         "Trigger": report.get("trigger"),
         "Started": f"{started:%Y-%m-%d %H:%M:%S} CST" if started else "unavailable",
     }
-    lines.extend(f"| {key} | {_md(value)} |" for key, value in metadata.items())
+    lines.extend(f"| {key} | {value if key == 'Fiber' else _md(value)} |" for key, value in metadata.items())
     schedule = _schedule_summary(report)
     if schedule:
         lines.extend(["", _md(schedule)])
@@ -585,12 +585,13 @@ def build_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         checks = f"{_environment_note(report)}\n{checks}"
     fields = [
         {"name": "Run overview", "value": _truncate(_run_overview(report), FIELD_VALUE_LIMIT), "inline": False},
-        {"name": "Checks", "value": _truncate(checks, FIELD_VALUE_LIMIT), "inline": False},
-        {"name": "Scenarios", "value": _truncate("\n".join(_scenario_lines(report)), FIELD_VALUE_LIMIT), "inline": False},
     ]
+    if problems or environment_fault or not preflight:
+        fields.append({"name": "Checks", "value": _truncate(checks, FIELD_VALUE_LIMIT), "inline": False})
+    fields.append({"name": "Scenarios", "value": _truncate("\n".join(_scenario_lines(report)), FIELD_VALUE_LIMIT), "inline": False})
     version_lines = _fnn_version_lines(report)
     if version_lines:
-        fields.insert(0, {"name": "Fiber 版本检查", "value": _truncate("\n".join(version_lines), FIELD_VALUE_LIMIT), "inline": False})
+        fields.insert(0, {"name": "Version check", "value": _truncate("\n".join(version_lines), FIELD_VALUE_LIMIT), "inline": False})
     diagnosis = _compact_diagnosis(report)
     if diagnosis:
         fields.append({"name": "Failure diagnosis", "value": diagnosis, "inline": False})
@@ -610,12 +611,10 @@ def build_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
             "workflow did not pass."
         )
         color = FAILURE_COLOR
-    if _fnn_version_mismatch(report):
-        description = f"**Fiber 版本不匹配** · {description}"
     description += f" · ⏱ {_duration(report.get('total_seconds'))}"
     title_emoji = "🔌" if (environment_fault and not passed) else emoji
     embed = {
-        "title": _truncate(f"{title_emoji} CCH Daily Smoke · {'Fiber 版本不匹配' if _fnn_version_mismatch(report) else 'Testnet'} · #{_one_line(report.get('run_number'), 'unknown')}", 256),
+        "title": _truncate(f"{title_emoji} CCH Daily Smoke · {'Fiber version mismatch' if _fnn_version_mismatch(report) else 'Testnet'} · #{_one_line(report.get('run_number'), 'unknown')}", 256),
         "description": description,
         "color": color,
         "fields": fields,

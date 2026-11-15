@@ -92,11 +92,10 @@ def test_success_payload_has_one_compact_green_embed_and_full_report_link():
     assert embed["title"] == "✅ CCH Daily Smoke · Testnet · #42"
     assert embed["url"].endswith("/actions/runs/123")
     assert embed["description"] == "3/3 smoke scenarios passed. · ⏱ 2m 5s"
-    assert set(fields) == {"Run overview", "Checks", "Scenarios"}
+    assert set(fields) == {"Run overview", "Scenarios"}
     assert any("retry" in line.lower() and "2" in line for line in fields["Run overview"].splitlines())
-    assert "FNN `v0.9.0`" in fields["Run overview"]
+    assert "Fiber [0.9.0 release](https://github.com/nervosnetwork/fiber/releases/tag/v0.9.0)" in fields["Run overview"]
     assert "release" in fields["Run overview"]
-    assert fields["Checks"] == "✅ All checks passed"
     assert embed["footer"]["text"] == "Click the title for the full report and logs"
     rendered = json.dumps(payload, ensure_ascii=False)
     for detail in (
@@ -145,7 +144,7 @@ def test_absent_schedule_metadata_still_renders_a_compact_overview():
     overview = fields_by_name(report.payload_from_env(complete_env()))["Run overview"]
 
     assert "release" in overview
-    assert "FNN `v0.9.0`" in overview
+    assert "Fiber [0.9.0 release]" in overview
     assert "Delay" not in overview
     assert len(overview.splitlines()) <= 4
 
@@ -168,7 +167,7 @@ def test_invalid_schedule_metadata_does_not_invent_schedule_details(day, started
 
     overview = fields_by_name(report.payload_from_env(env))["Run overview"]
 
-    assert "FNN `v0.9.0`" in overview
+    assert "Fiber [0.9.0 release]" in overview
     assert "Delay" not in overview
     assert "Scheduled 2026" not in github_summary(env)
 
@@ -235,10 +234,11 @@ def test_ci_summary_preserves_full_run_and_scenario_details():
     summary = summary_text(env)
 
     for value in (
-        "codex/report", "0123456789abcdef", "fnn-v0.9.0-x86_64-linux.tar.gz",
+        "codex/report", "0123456789abcdef",
         "v0.9.0", "release", "/actions/runs/123", "2m 5s",
     ):
         assert value in summary
+    assert "fnn-v0.9.0-x86_64-linux.tar.gz" not in summary
     for key, label in report.SCENARIOS:
         assert label in summary
         data = json.loads(env[f"CCH_REPORT_{key.upper()}_JSON"])
