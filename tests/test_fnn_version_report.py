@@ -1,6 +1,7 @@
 """A version preflight failure must be understandable without opening job logs."""
 
 import json
+import re
 from unittest import mock
 
 import pytest
@@ -11,6 +12,7 @@ from test_daily_smoke_report import complete_env, fields_by_name, github_summary
 
 def version_env(*, mismatch=True):
     env = complete_env()
+    env["CCH_REPORT_FNN_VERSION"] = "fnn Fiber v0.10.0 (d6868d1 2026-11-13)"
     env["CCH_REPORT_FNN_LATEST_TAG"] = "v0.10.1"
     env["CCH_REPORT_FNN_CHECK"] = json.dumps({
         "status": "version-mismatch" if mismatch else "verified",
@@ -37,15 +39,15 @@ def test_version_mismatch_is_visible_in_both_report_headlines_and_all_versions()
     payload = report.payload_from_env(env)
     embed = payload["embeds"][0]
     summary = github_summary(env)
-    versions = fields_by_name(payload)["Fiber 版本检查"]
+    versions = fields_by_name(payload)["Version check"]
 
-    assert "Fiber 版本不匹配" in embed["title"]
-    assert "Fiber 版本不匹配" in embed["description"]
-    assert summary.startswith("# CCH Daily Smoke · Fiber 版本不匹配\n")
-    assert summary.index("Fiber 版本不匹配") < summary.index("## Run overview")
-    for value in ("v0.10.0-rc3", "d6868d1", "node1", "node2", "CLI", "v0.10.1", "三组支付测试均未运行", "人工统一"):
+    assert "Fiber version mismatch" in embed["title"]
+    assert summary.startswith("# CCH Daily Smoke · Fiber version mismatch\n")
+    assert summary.index("Version check") < summary.index("## Run overview")
+    for value in ("v0.10.0-rc3", "d6868d1", "node1", "node2", "CLI", "No payment scenarios ran."):
         assert value in versions
         assert value in summary
+    assert not re.search(r"[\u4e00-\u9fff]", json.dumps(payload, ensure_ascii=False) + summary)
     assert embed["color"] == report.FAILURE_COLOR
     assert "Failure diagnosis" not in fields_by_name(payload)
 
@@ -56,18 +58,66 @@ def test_newer_release_is_advisory_when_the_pinned_versions_match():
 
     assert embed["title"].startswith("✅")
     assert embed["color"] == report.SUCCESS_COLOR
-    assert "版本不匹配" not in embed["description"]
-    assert "节点版本落后最新正式版" in fields_by_name(report.payload_from_env(env))["Fiber 版本检查"]
-    assert "最新发布仅供人工升级参考" in github_summary(env)
+    assert "version mismatch" not in embed["title"]
+    fields = fields_by_name(report.payload_from_env(env))
+    assert "Version check" not in fields
+    assert "Fiber [0.10.0 release]" in fields["Run overview"]
+    assert "latest [0.10.1 release]" in fields["Run overview"]
+    assert "informational" not in github_summary(env).lower()
+
+
+def test_matching_release_is_shown_once_without_node_inventory():
+    env = version_env(mismatch=False)
+    env["CCH_REPORT_FNN_VERSION"] = "fnn Fiber v0.10.1 (d9b6bbd 2026-11-14)"
+    check = json.loads(env["CCH_REPORT_FNN_CHECK"])
+    check.update({
+        "expected_tag": "v0.10.1", "expected_commit": "d9b6bbd",
+        "nodes": {node:env["CCH_REPORT_FNN_VERSION"] for node in ("node1", "node2")},
+        "running": {node:"0.10.1 (d9b6bbd 2026-11-14)" for node in ("node1", "node2")},
+        "cli_version": "fnn-cli 0.10.1",
+    })
+    env["CCH_REPORT_FNN_CHECK"] = json.dumps(check)
+    payload = report.payload_from_env(env)
+    rendered = json.dumps(payload, ensure_ascii=False)
+    summary = github_summary(env)
+    link = "[0.10.1 release](https://github.com/nervosnetwork/fiber/releases/tag/v0.10.1)"
+
+    assert set(fields_by_name(payload)) == {"Run overview", "Scenarios"}
+    assert fields_by_name(payload)["Run overview"].splitlines()[1] == f"Fiber {link}"
+    assert rendered.count(link) == summary.count(link) == 1
+    for value in ("node1", "node2", "CLI", "d9b6bbd", "Latest", "Version check", "Package"):
+        assert value not in rendered
+        assert value not in summary
+    assert not re.search(r"[\u4e00-\u9fff]", rendered + summary)
+
+
+def test_same_tag_rpc_commit_mismatch_keeps_the_actual_difference():
+    env = version_env()
+    check = json.loads(env["CCH_REPORT_FNN_CHECK"])
+    check.update({
+        "expected_tag": "v0.10.1", "expected_commit": "d9b6bbd",
+        "problems": [{
+            "component": "node2 RPC", "kind": "version-mismatch",
+            "expected": "v0.10.1 (d9b6bbd)", "actual": "0.10.1 (abcdef0 2026-11-13)",
+        }],
+    })
+    env["CCH_REPORT_FNN_CHECK"] = json.dumps(check)
+    versions = fields_by_name(report.payload_from_env(env))["Version check"]
+
+    assert "Expected: v0.10.1 (d9b6bbd)" in versions
+    assert "node2 RPC: 0.10.1 (abcdef0 2026-11-13)" in versions
+    assert "node1" not in versions
+    assert "CLI" not in versions
+    assert "abcdef0" in github_summary(env)
 
 
 def test_unavailable_latest_release_does_not_hide_the_actual_mismatch():
     env = version_env()
     env["CCH_REPORT_FNN_LATEST_TAG"] = ""
-    versions = fields_by_name(report.payload_from_env(env))["Fiber 版本检查"]
+    versions = fields_by_name(report.payload_from_env(env))["Version check"]
 
-    assert "版本不匹配" in versions
-    assert "最新正式版: 查询不可用" in versions
+    assert "Fiber version mismatch" in report.payload_from_env(env)["embeds"][0]["title"]
+    assert "latest" not in fields_by_name(report.payload_from_env(env))["Run overview"]
     assert "v0.10.0-rc3" in versions
 
 
@@ -77,8 +127,8 @@ def test_invalid_version_diagnostic_does_not_invent_a_version_cause(raw):
     env["CCH_REPORT_FNN_CHECK"] = raw
     embed = report.payload_from_env(env)["embeds"][0]
 
-    assert "版本不匹配" not in embed["description"]
-    assert "Fiber 版本检查" not in fields_by_name(report.payload_from_env(env))
+    assert "version mismatch" not in embed["title"]
+    assert "Version check" not in fields_by_name(report.payload_from_env(env))
 
 
 @pytest.mark.parametrize("fail", [False, True])
