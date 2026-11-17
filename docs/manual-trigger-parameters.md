@@ -104,7 +104,7 @@
 | `CCH_FIBER_SWAP_LND_REMOTE_PUBKEY` | `03c7796e…290d` | 对端（FiberSwap 的 LND）身份。 |
 | `CCH_FIBER_SWAP_LND_CHANNEL_POINT` | `70fdfd0d…35:1` | 必须走的 Lightning 通道 outpoint。 |
 | `CCH_FIBER_SWAP_BOTTLE_PUBKEY` | `02b6d4e3…be71` | 中间的 Bottle 节点身份。 |
-| `CCH_FIBER_SWAP_FIBER_CHANNEL_ID` | `0x4b6513e2…5536` | Fiber 侧通道 id。 |
+| `CCH_FIBER_SWAP_FIBER_CHANNEL_ID` | `0x27415e31…2582c4` | Fiber 侧通道 id。 |
 | `CCH_FIBER_SWAP_LND_D_LNCLI_PREFIX` | — | 换 `lncli` 调用方式时才用。 |
 
 ### 5.2 relay 场景专用（09-24/09-25 失败在这里）
