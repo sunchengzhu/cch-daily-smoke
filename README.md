@@ -368,6 +368,7 @@ make smoke
 | `CCH_SMOKE_FIBER_CHANNEL_ID` | unset | 多条 cWBTC channel 时指定目标 channel |
 | `CCH_SMOKE_LND_CHANNEL_ID` | unset | 多条 LND channel 时指定目标 channel |
 | `CCH_SMOKE_LND_NETWORK` | `testnet4` | 原有 local CCH smoke 使用的 Bitcoin/Lightning testnet4 网络 |
+| `CCH_SMOKE_LND_A_PEER_ADDR` | `lnd-a:9735` | 本地通道断连时，`lnd-b` 用于重新连接 `lnd-a` 的 Docker 内网地址 |
 | `CCH_SMOKE_LND_MIN_SPENDABLE_SATS` | `1000000` | 独立 CI 流动性步骤要求 `lnd-b` 至少保有的可支付余额 |
 | `CCH_SMOKE_LND_TOPUP_SATS` | `3000000` | `lnd-b` outbound 不足时，从 `lnd-a` 一次补充的最小流动性缓冲；实际补充量至少覆盖 channel reserve 与本次支付缺口 |
 | `CCH_SMOKE_FNN_AUTH_TOKEN` | unset | Fiber RPC biscuit token |
@@ -387,6 +388,10 @@ CI 在 smoke 前通过独立的 `Ensure LND outbound liquidity` 步骤检查流�
 ```bash
 python scripts/ensure_lnd_liquidity.py
 ```
+
+若现有 `lnd-a ↔ lnd-b` 通道因 peer 断连而 inactive，该步骤会先按
+`lnd-a` 实时公钥重连 `lnd-b`，最多等待 30 秒恢复 active；仍未恢复则失败，
+不会创建新通道。
 
 当 `lnd-b` 可支付余额低于 `CCH_SMOKE_LND_MIN_SPENDABLE_SATS` 时，该步骤从
 `lnd-a` 一次转入至少 `CCH_SMOKE_LND_TOPUP_SATS`；业务 smoke 本身不会再补充或
